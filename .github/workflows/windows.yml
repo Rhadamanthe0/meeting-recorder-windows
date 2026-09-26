@@ -56,14 +56,25 @@ jobs:
       # NB : pas de LIBCLANG_PATH (ort/whisper-rs précompilés, pas de bindgen ici).
       - name: Expose GTK au build GNU
         run: |
-          # Localise pkgconf MSYS2 dynamiquement (le dossier réel varie selon le runner).
+          # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
+          Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
+          Get-ChildItem $env:RUNNER_TEMP -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[ci] tempdir: $($_.FullName)" }
+          $roots = @((Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
           $p = $null
           try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
-          # setup-msys2 installe sous RUNNER_TEMP\setup-msys2 sur ces runners.
-          $roots = @((Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
-          Write-Output "[ci] racines testees : $($roots -join ', ')"
-          foreach ($r in $roots) { if (-not $p -and $r -and (Test-Path "$r\ucrt64\bin\pkgconf.exe")) { $p = "$r\ucrt64\bin\pkgconf.exe" } }
-          if (-not $p) { throw "pkgconf.exe introuvable (ni PATH ni D:/C: msys64)" }
+          foreach ($r in $roots) {
+            Write-Output "[ci] test racine : $r -> $(Test-Path $r)"
+            foreach ($sub in @("ucrt64\bin\pkgconf.exe", "msys64\ucrt64\bin\pkgconf.exe", "usr\bin\pkgconf.exe")) {
+              $cand = if ($r) { Join-Path $r $sub } else { $null }
+              if (-not $p -and $cand -and (Test-Path $cand)) { $p = $cand }
+            }
+            if (Test-Path $r) { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { Write-Output "[ci] subdir de $r : $($_.Name)" } }
+          }
+          if (-not $p) {
+            Write-Output "[ci] recherche pkgconf.exe sous RUNNER_TEMP (peut prendre 1-2 min)"
+            Get-ChildItem -Path $env:RUNNER_TEMP -Filter "pkgconf.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Write-Output "[ci] trouve : $($_.FullName)"; if (-not $p) { $p = $_.FullName } }
+          }
+          if (-not $p) { throw "pkgconf.exe introuvable meme apres diagnostic (voir [ci] ci-dessus)" }
           $bindir = Split-Path $p -Parent
           $ucrt = Split-Path $bindir -Parent
           $bindir >> $env:GITHUB_PATH
