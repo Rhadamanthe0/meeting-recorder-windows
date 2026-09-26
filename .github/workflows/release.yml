@@ -100,6 +100,17 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
+      # windows_gen 0.18 ne lit les métadonnées que depuis target/.windows/winmd, copié depuis le SDK.
+      - name: Fournit Windows.winmd (windows_gen 0.18)
+        run: |
+          New-Item -ItemType Directory -Force -Path "target/.windows/winmd" | Out-Null
+          $sdkRoots = @($env:WindowsSdkDir, "C:\Program Files (x86)\Windows Kits\10\") | Where-Object { $_ -and (Test-Path $_) }
+          $winmd = $null
+          foreach ($sdk in $sdkRoots) { if (-not $winmd) { $winmd = Get-ChildItem -Path (Join-Path $sdk "UnionMetadata") -Filter "Windows.winmd" -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 } }
+          if (-not $winmd) { throw "Windows.winmd introuvable dans le SDK ($($sdkRoots -join ', '))" }
+          Copy-Item -LiteralPath $winmd.FullName -Destination "target/.windows/winmd/Windows.winmd" -Force
+          Write-Output "[ci] winmd=$($winmd.FullName)"
+
       # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
       # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
       - name: Generate lockfile
