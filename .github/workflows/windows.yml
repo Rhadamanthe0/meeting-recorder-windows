@@ -59,20 +59,28 @@ jobs:
           "C:\msys64\ucrt64\bin" >> $env:GITHUB_PATH
           "PKG_CONFIG_PATH=C:\msys64\ucrt64\lib\pkgconfig;C:\msys64\ucrt64\share\pkgconfig" >> $env:GITHUB_ENV
 
-      - name: Generate lockfile if missing
-        run: |
-          if (-not (Test-Path -LiteralPath "Cargo.lock")) { cargo generate-lockfile }
+      # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
+      # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
+      - name: Generate lockfile
+        run: cargo generate-lockfile
 
-      # Build verrouillé reproductible quand Cargo.lock est présent.
+      # Contrôle sur le lock régénéré ci-dessus.
       - name: Check
-        run: |
-          if (Test-Path -LiteralPath "Cargo.lock") { cargo check --locked } else { cargo check }
+        run: cargo check
 
       - name: Test
         run: cargo test
 
       - name: Build release (Vulkan OFF by default)
         run: cargo build --release
+
+      # Lock régénéré à récupérer pour le committer ensuite.
+      - name: Upload Cargo.lock régénéré
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock
+          if-no-files-found: warn
+          path: Cargo.lock
 
       - name: Upload artefact Windows x86_64
         uses: actions/upload-artifact@v4
