@@ -4,6 +4,24 @@
 # puis affiche les prochaines étapes.
 # Usage : powershell -ExecutionPolicy Bypass -File .\install.ps1
 
+# --- Auto-mise à jour depuis GitHub (idempotent, ne supprime rien) ---
+# Si lancé dans un clone git du dépôt, récupère les derniers commits.
+# Sinon, affiche l'URL de clone et continue l'installation ici.
+$RepoUrl = "https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows"
+$git = Get-Command git -ErrorAction SilentlyContinue
+if ($git -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot ".git"))) {
+    Write-Host "[install] Mise à jour du dépôt (git pull --ff-only)..."
+    try {
+        & git pull --ff-only
+    }
+    catch {
+        Write-Warning "[install] git pull impossible (hors ligne ?). On continue avec la version locale."
+    }
+}
+else {
+    Write-Host "[install] Pour récupérer le dépôt depuis GitHub : git clone $RepoUrl"
+}
+
 $ErrorActionPreference = "Stop"
 
 # --- Vérifie que winget est disponible ---

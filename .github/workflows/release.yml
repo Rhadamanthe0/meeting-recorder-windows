@@ -1,9 +1,14 @@
-name: windows
+name: release
 
-# Build Windows : toolchain GNU alignée sur les libs GTK MinGW (UCRT64).
+# Release Windows déclenchée par tag v* (ex. v0.1.0). Build identique à
+# windows.yml (toolchain GNU + MSYS2 UCRT64), puis publication GitHub.
 on:
   push:
-  pull_request:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,11 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
-      # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
-      # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
-      # libadwaita MinGW depuis MSVC) :
-      #   toolchain: stable / targets: x86_64-pc-windows-msvc
+      # Même stratégie GTK que windows.yml : hôte GNU aligné sur MinGW UCRT64.
       - name: Install Rust stable GNU
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,7 +43,7 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-gcc
 
-      # ffmpeg recommandé (seek précis, formes d'onde, imports) : non bloquant.
+      # ffmpeg recommandé : non bloquant.
       - name: Install ffmpeg
         run: |
           try {
@@ -52,8 +53,6 @@ jobs:
           }
           exit 0
 
-      # Expose pkg-config + gcc UCRT64 au build cargo (hôte GNU par défaut).
-      # NB : pas de LIBCLANG_PATH (ort/whisper-rs précompilés, pas de bindgen ici).
       - name: Expose GTK au build GNU
         run: |
           "C:\msys64\ucrt64\bin" >> $env:GITHUB_PATH
@@ -63,7 +62,6 @@ jobs:
         run: |
           if (-not (Test-Path -LiteralPath "Cargo.lock")) { cargo generate-lockfile }
 
-      # Build verrouillé reproductible quand Cargo.lock est présent.
       - name: Check
         run: |
           if (Test-Path -LiteralPath "Cargo.lock") { cargo check --locked } else { cargo check }
@@ -83,3 +81,27 @@ jobs:
             target/release/meeting-recorder-windows.exe
             README.md
             install.ps1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artefact Windows x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist
+
+      # Version = tag déclencheur (github.ref_name). Notes auto, release finale.
+      - name: Publie la release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/meeting-recorder-windows.exe
+            dist/**/README.md
+            dist/**/install.ps1
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
