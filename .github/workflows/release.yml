@@ -55,10 +55,18 @@ jobs:
 
       - name: Expose GTK au build GNU
         run: |
-          "C:\msys64\ucrt64\bin" >> $env:GITHUB_PATH
-          "PKG_CONFIG_PATH=C:\msys64\ucrt64\lib\pkgconfig;C:\msys64\ucrt64\share\pkgconfig" >> $env:GITHUB_ENV
-          # La crate pkg-config cherche pkg-config mais MSYS2 fournit pkgconf.exe.
-          "PKG_CONFIG=C:\msys64\ucrt64\bin\pkgconf.exe" >> $env:GITHUB_ENV
+          # Localise pkgconf MSYS2 dynamiquement (le dossier réel varie selon le runner).
+          $p = $null
+          try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
+          foreach ($r in @("D:\msys64", "C:\msys64")) { if (-not $p -and (Test-Path "$r\ucrt64\bin\pkgconf.exe")) { $p = "$r\ucrt64\bin\pkgconf.exe" } }
+          if (-not $p) { throw "pkgconf.exe introuvable (ni PATH ni D:/C: msys64)" }
+          $bindir = Split-Path $p -Parent
+          $ucrt = Split-Path $bindir -Parent
+          $bindir >> $env:GITHUB_PATH
+          "PKG_CONFIG=$p" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$ucrt\lib\pkgconfig;$ucrt\share\pkgconfig" >> $env:GITHUB_ENV
+          try { Copy-Item -LiteralPath $p -Destination (Join-Path $bindir "pkg-config.exe") } catch { Write-Warning "[ci] copie pkg-config.exe impossible, on continue : $($_.Exception.Message)" }
+          Write-Output "[ci] pkgconf=$p"
 
       # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
       # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
