@@ -109,6 +109,16 @@ jobs:
           foreach ($sdk in $sdkRoots) { if (-not $winmd) { $winmd = Get-ChildItem -Path (Join-Path $sdk "UnionMetadata") -Filter "Windows.winmd" -Recurse -ErrorAction SilentlyContinue | Where-Object { ($_.FullName -notmatch "Facade") -and ($_.Length -gt 1MB) } | Sort-Object FullName -Descending | Select-Object -First 1 } }
           if (-not $winmd) { throw "Windows.winmd introuvable dans le SDK ($($sdkRoots -join ', '))" }
           Copy-Item -LiteralPath $winmd.FullName -Destination "target/.windows/winmd/Windows.winmd" -Force
+          # windows_gen 0.18 lit depuis le CWD du registry : plante le winmd aux 3 endroits lus.
+          $dest2 = @()
+          $reg = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME ".cargo" }
+          Get-ChildItem -Path (Join-Path $reg "registry/src") -Filter "wasapi-*" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $d = Join-Path $_.FullName ".windows/winmd"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+            Copy-Item -LiteralPath "target/.windows/winmd/Windows.winmd" -Destination (Join-Path $d "Windows.winmd") -Force
+            Write-Output "[ci] winmd plante (registry) : $d"
+          }
+          $first = ($env:PATH -split ';')[0]
+          if ($first) { $gp = Split-Path (Split-Path $first -Parent) -Parent; $d3 = Join-Path $gp ".windows/winmd"; New-Item -ItemType Directory -Force -Path $d3 | Out-Null; Copy-Item -LiteralPath "target/.windows/winmd/Windows.winmd" -Destination (Join-Path $d3 "Windows.winmd") -Force; Write-Output "[ci] winmd plante (PATH) : $d3" }
           Write-Output "[ci] winmd=$($winmd.FullName)"
 
       # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
