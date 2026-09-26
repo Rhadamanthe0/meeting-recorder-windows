@@ -1,6 +1,7 @@
 #![cfg(target_os = "windows")]
 //! Capture WASAPI : micro (`@DEFAULT_SOURCE@`) + loopback système
-//! (`@DEFAULT_MONITOR@`), via la crate `wasapi` 0.4 déjà déclarée.
+//! (`@DEFAULT_MONITOR@`), via la crate `wasapi` 0.24 déclarée
+//! (crate `windows` moderne, métadonnées embarquées, pas de winmd à fournir).
 //!
 //! Même contrat que `super::linux` : un thread par `Source`, chunks de
 //! 20 ms en s16le 48 kHz stéréo, historique de 3 s de pics, écriture dans
@@ -17,7 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{CHANNELS, HISTORY, RATE};
-use wasapi::{Direction, SampleType, ShareMode, WaveFormat, get_default_device, initialize_mta};
+use wasapi::{
+    DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta,
+};
 
 /// 20 ms of s16le audio.
 const CHUNK_BYTES: usize = (RATE / 50 * 2 * CHANNELS) as usize;
@@ -271,14 +274,18 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
 
     // `@DEFAULT_MONITOR@` = loopback du rendu par défaut ; tout le reste
     // (`@DEFAULT_SOURCE@` inclus) = capture micro par défaut.
-    // NOTE wasapi 0.4 : `get_default_device` ne connaît que les devices par
-    // défaut ; un nom explicite retombe sur le micro par défaut.
+    // NOTE wasapi 0.24 : plus de `get_default_device` libre ; on passe par
+    // `DeviceEnumerator`. Un nom explicite retombe sur le micro par défaut.
     let default_dir = if device == "@DEFAULT_MONITOR@" {
         Direction::Render
     } else {
         Direction::Capture
     };
-    let dev = match get_default_device(&default_dir) {
+    let enumerator = match DeviceEnumerator::new() {
+        Ok(enumerator) => enumerator,
+        Err(_) => return,
+    };
+    let dev = match enumerator.get_default_device(&default_dir) {
         Ok(dev) => dev,
         Err(_) => return,
     };
@@ -295,14 +302,22 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     if !desc.valid || desc.blockalign == 0 || desc.channels == 0 {
         return;
     }
-    let period = match client.get_periods() {
+    let period = match client.get_device_period() {
         Ok((def, _)) if def > 0 => def,
         _ => FALLBACK_PERIOD_HNS,
     };
     // Direction::Capture sur un device Render = loopback partagé
-    // (AUDCLNT_STREAMFLAGS_LOOPBACK, cf. wasapi 0.4 `initialize_client`).
+    // (AUDCLNT_STREAMFLAGS_LOOPBACK, cf. wasapi 0.24 `initialize_client`).
+    // `autoconvert: true` garde le format mix accepté (SRC moteur audio).
     if client
-        .initialize_client(&mix, period, &Direction::Capture, &ShareMode::Shared, false)
+        .initialize_client(
+            &mix,
+            &Direction::Capture,
+            &StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: period,
+            },
+        )
         .is_err()
     {
         return;
@@ -324,9 +339,9 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
 
     loop {
         // Draine tous les paquets disponibles (GetBuffer/ReleaseBuffer via
-        // le wrapper wasapi 0.4).
+        // le wrapper wasapi 0.24).
         loop {
-            let next = match capture.get_next_nbr_frames() {
+            let next = match capture.get_next_packet_size() {
                 Ok(next) => next,
                 Err(_) => {
                     let _ = client.stop_stream();
@@ -342,8 +357,8 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
                 break;
             }
             raw.resize(need, 0);
-            let got = match capture.read_from_device(desc.blockalign, &mut raw) {
-                Ok(got) => got as usize,
+            let (got, info) = match capture.read_from_device(&mut raw) {
+                Ok((got, info)) => (got as usize, info),
                 Err(_) => {
                     let _ = client.stop_stream();
                     return;
@@ -352,12 +367,15 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             if got == 0 {
                 break;
             }
-            // NOTE wasapi 0.4 ne remonte pas AUDCLNT_BUFFERFLAGS_SILENT :
-            // un paquet silencieux du loopback arrive comme des zéros (cas
-            // courant) ou, selon le driver, des données indéfinies.
+            // AUDCLNT_BUFFERFLAGS_SILENT : le moteur signale un paquet
+            // silencieux (loopback sans son) ; le contenu est indéfini,
+            // on le remplace par des zéros.
             // L'absence de paquet (rendu silencieux) est traitée en zéros
             // ci-dessous via la cadence à 20 ms.
             let len = got.saturating_mul(desc.blockalign).min(raw.len());
+            if info.flags.silent {
+                raw[..len].fill(0);
+            }
             converter.push_packet(&raw[..len], &mut pending);
         }
 
