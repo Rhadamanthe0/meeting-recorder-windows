@@ -488,3 +488,16 @@ if (BUILD_SHARED_LIBS)
         target_compile_definitions(${target} PUBLIC  GGML_SHARED)
     endforeach()
 endif()
+
+# meeting-recorder-windows : installe les libs statiques linkées par whisper-rs-sys
+# (le cmake amont n'installe que `whisper`, jamais ggml/ggml-base/ggml-cpu).
+install(TARGETS ggml ggml-base
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin)
+if (TARGET ggml-cpu)
+    install(TARGETS ggml-cpu
+            ARCHIVE DESTINATION lib
+            LIBRARY DESTINATION lib
+            RUNTIME DESTINATION bin)
+endif()
