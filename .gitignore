@@ -1,0 +1,12 @@
+/target
+# The full screenshot and video library; only the images the README uses live in screenshots/.
+/media/
+/bench/.cache/
+__pycache__/
+target/
+*.meeting-recorder
+.meeting-recorder-cache/
+models/
+# Captures brutes WASAPI (s16le 48 kHz stéréo) et modèles Whisper téléchargés.
+*.raw
+models/*.bin
