@@ -57,6 +57,8 @@ jobs:
         run: |
           "C:\msys64\ucrt64\bin" >> $env:GITHUB_PATH
           "PKG_CONFIG_PATH=C:\msys64\ucrt64\lib\pkgconfig;C:\msys64\ucrt64\share\pkgconfig" >> $env:GITHUB_ENV
+          # La crate pkg-config cherche pkg-config mais MSYS2 fournit pkgconf.exe.
+          "PKG_CONFIG=C:\msys64\ucrt64\bin\pkgconf.exe" >> $env:GITHUB_ENV
 
       # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
       # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
