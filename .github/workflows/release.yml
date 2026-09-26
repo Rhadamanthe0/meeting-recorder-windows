@@ -58,7 +58,10 @@ jobs:
           # Localise pkgconf MSYS2 dynamiquement (le dossier réel varie selon le runner).
           $p = $null
           try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
-          foreach ($r in @("D:\msys64", "C:\msys64")) { if (-not $p -and (Test-Path "$r\ucrt64\bin\pkgconf.exe")) { $p = "$r\ucrt64\bin\pkgconf.exe" } }
+          # setup-msys2 installe sous RUNNER_TEMP\setup-msys2 sur ces runners.
+          $roots = @((Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
+          Write-Output "[ci] racines testees : $($roots -join ', ')"
+          foreach ($r in $roots) { if (-not $p -and $r -and (Test-Path "$r\ucrt64\bin\pkgconf.exe")) { $p = "$r\ucrt64\bin\pkgconf.exe" } }
           if (-not $p) { throw "pkgconf.exe introuvable (ni PATH ni D:/C: msys64)" }
           $bindir = Split-Path $p -Parent
           $ucrt = Split-Path $bindir -Parent
