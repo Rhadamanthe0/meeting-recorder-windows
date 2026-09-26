@@ -833,10 +833,16 @@ fn chat_payload(model: &str, content: &str) -> serde_json::Value {
 fn post_chat(base: &str, model: &str, content: &str) -> Result<String, String> {
     let url = format!("{base}/chat/completions");
     let body = chat_payload(model, content).to_string();
-    let response = ureq::post(url.as_str())
-        .timeout(TIMEOUT)
-        .header("Content-Type", "application/json")
-        .send(body)
+    let response = {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .build()
+            .into();
+        agent
+            .post(url.as_str())
+            .header("Content-Type", "application/json")
+            .send(body)
+    }
         .map_err(|e| format!("{base}: {e}"))?;
     let mut body = String::new();
     response
@@ -862,7 +868,13 @@ pub fn status() -> Result<Agent, Unavailable> {
     let (bases, _) = llm_config();
     for base in &bases {
         let url = format!("{base}/models");
-        let probe = ureq::get(url.as_str()).timeout(PROBE_TIMEOUT).call();
+        let probe = {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(PROBE_TIMEOUT))
+                .build()
+                .into();
+            agent.get(url.as_str()).call()
+        };
         if probe.is_ok() {
             return Ok(Agent {
                 id: "local-llm".into(),
@@ -888,7 +900,8 @@ pub fn run(agent: &Agent, prompt: &str, text: &str) -> Result<String, String> {
     for base in &bases {
         match post_chat(base, &model, &full) {
             Ok(answer) => {
-                let answer = truncate(&tidy(&answer), MAX_ANSWER_BYTES);
+                let tidied = tidy(&answer);
+                let answer = truncate(&tidied, MAX_ANSWER_BYTES);
                 if answer.trim().is_empty() {
                     return Err("The local model returned nothing".into());
                 }
