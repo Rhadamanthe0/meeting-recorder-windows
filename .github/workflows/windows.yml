@@ -43,6 +43,7 @@ jobs:
             mingw-w64-ucrt-x86_64-libadwaita
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
 
       # ffmpeg recommandé (seek précis, formes d'onde, imports) : non bloquant.
       - name: Install ffmpeg
@@ -82,6 +83,8 @@ jobs:
           $bindir >> $env:GITHUB_PATH
           "PKG_CONFIG=$p" >> $env:GITHUB_ENV
           "PKG_CONFIG_PATH=$ucrt\lib\pkgconfig;$ucrt\share\pkgconfig" >> $env:GITHUB_ENV
+          # bindgen (whisper-rs) exige libclang.dll via LIBCLANG_PATH (ucrt64/bin).
+          "LIBCLANG_PATH=$bindir" >> $env:GITHUB_ENV
           try { Copy-Item -LiteralPath $p -Destination (Join-Path $bindir "pkg-config.exe") } catch { Write-Warning "[ci] copie pkg-config.exe impossible, on continue : $($_.Exception.Message)" }
           Write-Output "[ci] pkgconf=$p"
 
