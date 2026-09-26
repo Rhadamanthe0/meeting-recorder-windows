@@ -33,3 +33,7 @@ vulkan = ["whisper-rs/vulkan"]
 [[bin]]
 name = "meeting-recorder-windows"
 path = "src/main.rs"
+
+[patch.crates-io]
+# whisper-rs-sys 0.15.0 + /utf-8 restreint à MSVC (build GNU/MinGW) : https://github.com/Rhadamanthe0/whisper-rs-sys
+whisper-rs-sys = { git = "https://github.com/Rhadamanthe0/whisper-rs-sys", rev = "c17eababf2c171a5a2f8ab36fb7955b7d0e45573" }

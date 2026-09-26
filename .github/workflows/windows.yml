@@ -24,6 +24,8 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
+          # Éteint le warning rustfmt non fatal vu en log CI.
+          components: rustfmt
 
       - name: Affiche la toolchain (hôte GNU attendu)
         run: rustc -vV
@@ -83,6 +85,22 @@ jobs:
           try { Copy-Item -LiteralPath $p -Destination (Join-Path $bindir "pkg-config.exe") } catch { Write-Warning "[ci] copie pkg-config.exe impossible, on continue : $($_.Exception.Message)" }
           Write-Output "[ci] pkgconf=$p"
 
+      # ORT dynamique : binaires Microsoft 1.28 pour ort-sys GNU (sans précompilés GNU).
+      - name: ORT dynamique Microsoft 1.28
+        run: |
+          $ortZip = Join-Path $env:RUNNER_TEMP "ort.zip"
+          $ortDir = Join-Path $env:RUNNER_TEMP "ort"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip" -OutFile $ortZip
+          Expand-Archive -LiteralPath $ortZip -DestinationPath $ortDir -Force
+          $ortRoot = Join-Path $ortDir "onnxruntime-win-x64-1.28.0"
+          $ortLib = Join-Path $ortRoot "lib"
+          if (-not (Test-Path $ortLib)) { $ortLib = $ortRoot }
+          "ORT_LIB_LOCATION=$ortLib" >> $env:GITHUB_ENV
+          "ORT_PREFER_DYNAMIC_LINK=1" >> $env:GITHUB_ENV
+          $ortLib >> $env:GITHUB_PATH
+          Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
+          Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
+
       # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
       # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
       - name: Generate lockfile
@@ -97,6 +115,10 @@ jobs:
 
       - name: Build release (Vulkan OFF by default)
         run: cargo build --release
+
+      # DLL ORT à côté de l'exe (copy-dylibs d'ort-sys ne vise pas target/release).
+      - name: Copie DLL ORT vers target/release
+        run: Copy-Item (Join-Path $env:ORT_LIB_LOCATION "*.dll") "target/release/" -Force
 
       # Lock régénéré à récupérer pour le committer ensuite.
       - name: Upload Cargo.lock régénéré
@@ -113,5 +135,7 @@ jobs:
           if-no-files-found: error
           path: |
             target/release/meeting-recorder-windows.exe
+            target/release/onnxruntime.dll
+            target/release/*.dll
             README.md
             install.ps1
