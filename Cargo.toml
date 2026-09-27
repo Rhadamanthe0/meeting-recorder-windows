@@ -1,6 +1,6 @@
 [package]
 name = "meeting-recorder-windows"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
@@ -21,7 +21,7 @@ wasapi = "0.24"
 rodio = "0.19"
 dirs = "6"
 interprocess = "2"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 default = []

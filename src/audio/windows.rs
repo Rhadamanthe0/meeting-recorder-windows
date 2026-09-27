@@ -15,7 +15,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{CHANNELS, HISTORY, RATE};
 use wasapi::{
@@ -96,6 +96,67 @@ impl Source {
             .copied()
             .fold(0.0, f32::max)
     }
+}
+
+/// Tag court pour le log fichier (`[mic|pc]`).
+fn tag(device: &str) -> &'static str {
+    if device == "@DEFAULT_MONITOR@" {
+        "pc"
+    } else {
+        "mic"
+    }
+}
+
+/// Heure HH:MM:SS (UTC via `SystemTime`, sans dépendance supplémentaire).
+fn now_hms() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() % 86_400)
+        .unwrap_or(0);
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Log fichier uniquement (`%APPDATA%\omarchy-meeting-recorder\audio-debug.log`) ;
+/// jamais de console. Toute erreur est ignorée pour ne pas changer le
+/// comportement audio.
+fn debug_log(device: &str, msg: &str) {
+    let line = format!("[{}] [{}] {}\n", now_hms(), tag(device), msg);
+    let Some(base) = dirs::data_dir() else {
+        return;
+    };
+    let path = base.join(crate::APP_NAME).join("audio-debug.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Nom court du layout natif pour le log MixDesc.
+fn kind_name(kind: SampleKind) -> &'static str {
+    match kind {
+        SampleKind::F32 => "f32",
+        SampleKind::I16 => "i16",
+        SampleKind::I24 => "i24",
+        SampleKind::I32 => "i32",
+    }
+}
+
+/// Échec d'init : une ligne avec l'étape + une ligne « reopen », puis retour
+/// (la boucle `spawn` dort 1 s et rouvre, comportement inchangé).
+fn init_failed(device: &str, step: &str) {
+    debug_log(device, &format!("init failed step={step}"));
+    debug_log(device, "reopen in 1s");
 }
 
 /// Layout natif d'un échantillon du format mix du device.
@@ -271,6 +332,7 @@ fn push_chunk(shared: &Mutex<Inner>, chunk: &[u8], chunks: &mut u64) {
 fn capture(device: &str, shared: &Mutex<Inner>) {
     // COM MTA pour ce thread (inutile mais inoffensif si déjà initialisé).
     let _ = initialize_mta();
+    debug_log(device, &format!("start device={device}"));
 
     // `@DEFAULT_MONITOR@` = loopback du rendu par défaut ; tout le reste
     // (`@DEFAULT_SOURCE@` inclus) = capture micro par défaut.
@@ -283,23 +345,56 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     };
     let enumerator = match DeviceEnumerator::new() {
         Ok(enumerator) => enumerator,
-        Err(_) => return,
+        Err(_) => {
+            init_failed(device, "enumerator");
+            return;
+        }
     };
     let dev = match enumerator.get_default_device(&default_dir) {
         Ok(dev) => dev,
-        Err(_) => return,
+        Err(_) => {
+            init_failed(device, "default-device");
+            return;
+        }
     };
+    // Nom convivial wasapi 0.24 (`get_friendlyname`), repli ID (`get_id`) ;
+    // rien d'inventé : si les deux échouent, on logue « unknown ».
+    match dev.get_friendlyname() {
+        Ok(name) => debug_log(device, &format!("endpoint friendlyname={name}")),
+        Err(_) => match dev.get_id() {
+            Ok(id) => debug_log(device, &format!("endpoint id={id}")),
+            Err(_) => debug_log(device, "endpoint unknown"),
+        },
+    }
     let mut client = match dev.get_iaudioclient() {
         Ok(client) => client,
-        Err(_) => return,
+        Err(_) => {
+            init_failed(device, "iaudioclient");
+            return;
+        }
     };
     // Format mix partagé : toujours accepté ; conversion logicielle derrière.
     let mix = match client.get_mixformat() {
         Ok(mix) => mix,
-        Err(_) => return,
+        Err(_) => {
+            init_failed(device, "mixformat");
+            return;
+        }
     };
     let desc = MixDesc::from_mix(&mix);
+    debug_log(
+        device,
+        &format!(
+            "mix rate={} channels={} kind={} valid={} blockalign={}",
+            desc.rate,
+            desc.channels,
+            kind_name(desc.kind),
+            desc.valid,
+            desc.blockalign
+        ),
+    );
     if !desc.valid || desc.blockalign == 0 || desc.channels == 0 {
+        init_failed(device, "desc-invalid");
         return;
     }
     let period = match client.get_device_period() {
@@ -320,14 +415,19 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         )
         .is_err()
     {
+        init_failed(device, "initialize-client");
         return;
     }
     let capture = match client.get_audiocaptureclient() {
         Ok(capture) => capture,
-        Err(_) => return,
+        Err(_) => {
+            init_failed(device, "captureclient");
+            return;
+        }
     };
     let event = client.set_get_eventhandle().ok();
     if client.start_stream().is_err() {
+        init_failed(device, "start-stream");
         return;
     }
 
@@ -336,6 +436,12 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     let mut raw = Vec::with_capacity(1 << 16);
     let mut chunks: u64 = 0;
     let mut last_emit = Instant::now();
+    // Compteurs pour le log fichier toutes les 5 s (paquets lus, paquets
+    // flag silent, converter inactif). Remis à zéro à chaque log.
+    let mut last_stats = Instant::now();
+    let mut pkts_since: u64 = 0;
+    let mut silent_since: u64 = 0;
+    let invalid = if desc.valid { 0 } else { 1 };
 
     loop {
         // Draine tous les paquets disponibles (GetBuffer/ReleaseBuffer via
@@ -362,7 +468,12 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
                 // `read_from_device` fait ReleaseBuffer même quand le tampon
                 // est trop petit ; le contenu hors norme est tronqué.
                 raw.resize(1 << 24, 0);
-                let _ = capture.read_from_device(&mut raw);
+                if let Ok((_, info)) = capture.read_from_device(&mut raw) {
+                    pkts_since += 1;
+                    if info.flags.silent {
+                        silent_since += 1;
+                    }
+                }
                 continue;
             }
             raw.resize(need, 0);
@@ -375,6 +486,10 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             };
             if got == 0 {
                 break;
+            }
+            pkts_since += 1;
+            if info.flags.silent {
+                silent_since += 1;
             }
             // AUDCLNT_BUFFERFLAGS_SILENT : le moteur signale un paquet
             // silencieux (loopback sans son) ; le contenu est indéfini,
@@ -400,6 +515,16 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             let chunk: Vec<u8> = pending.drain(..CHUNK_BYTES).collect();
             push_chunk(shared, &chunk, &mut chunks);
             last_emit = Instant::now();
+        }
+        // Compteurs toutes les 5 s par thread, depuis le dernier log.
+        if last_stats.elapsed() >= Duration::from_secs(5) {
+            debug_log(
+                device,
+                &format!("pkts={pkts_since} silent={silent_since} invalid={invalid}"),
+            );
+            pkts_since = 0;
+            silent_since = 0;
+            last_stats = Instant::now();
         }
 
         match &event {

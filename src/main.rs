@@ -26,9 +26,27 @@ use gtk::glib;
 pub const APP_ID: &str = "com.jankeesvw.OmarchyMeetingRecorder";
 pub const APP_NAME: &str = "omarchy-meeting-recorder";
 
+// Cache la fenêtre console en mode GUI (Windows uniquement). Erreurs
+// ignorées silencieusement : pas de log, pas de panic si pas de console.
+#[cfg(windows)]
+fn hide_console_window() {
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
 fn main() -> glib::ExitCode {
     match std::env::args().nth(1).as_deref() {
-        None => ui::run(None),
+        None => {
+            #[cfg(windows)]
+            hide_console_window();
+            ui::run(None)
+        }
         Some("--version" | "-V") => {
             let backend = if cfg!(feature = "vulkan") {
                 "Vulkan support; CPU fallback"
@@ -61,6 +79,8 @@ fn main() -> glib::ExitCode {
             if ipc::send("new-window") {
                 glib::ExitCode::SUCCESS
             } else {
+                #[cfg(windows)]
+                hide_console_window();
                 ui::run(None)
             }
         }
@@ -91,6 +111,8 @@ fn main() -> glib::ExitCode {
             if path.ends_with(&format!(".{}", meeting::EXTENSION))
                 || std::path::Path::new(path).is_dir() =>
         {
+            #[cfg(windows)]
+            hide_console_window();
             ui::run(Some(path))
         }
         Some(other) => {
