@@ -34,9 +34,10 @@ if (-not (Test-Path -LiteralPath $schemaCompiler)) {
 
 # --- DLLs système Windows : jamais embarquées (fournies par l'OS) ---
 # Liste explicite (insensible à la casse) + préfixes api-ms-*/ext-ms-*.
+# combase.dll : inbox Win10+, COM de base (importée via crate windows/WASAPI).
 $SystemDlls = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 @(
-    "advapi32.dll", "avrt.dll", "bcrypt.dll", "cfgmgr32.dll", "comctl32.dll",
+    "advapi32.dll", "avrt.dll", "bcrypt.dll", "cfgmgr32.dll", "combase.dll", "comctl32.dll",
     "comdlg32.dll", "crypt32.dll", "cryptbase.dll", "d2d1.dll", "d3d11.dll",
     "dcomp.dll", "dhcpcsvc.dll", "dnsapi.dll", "dwmapi.dll", "dxgi.dll",
     "fwpuclnt.dll", "gdi32.dll", "gdiplus.dll", "hid.dll", "imm32.dll",

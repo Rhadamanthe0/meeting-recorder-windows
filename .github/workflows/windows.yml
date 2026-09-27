@@ -181,6 +181,7 @@ jobs:
           }
           Write-Output "[ci] msi version=$version (ref=$ref)"
           powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/collect-runtime.ps1
+          if ($LASTEXITCODE -ne 0) { throw "collect-runtime.ps1 exit $LASTEXITCODE (stage partiel refusé)" }
           Set-Location packaging/windows
           heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
           candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
