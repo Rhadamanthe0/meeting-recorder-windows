@@ -18,7 +18,6 @@ libc = "0.2.189"
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.24"
-cpal = "0.15"
 rodio = "0.19"
 dirs = "6"
 interprocess = "2"

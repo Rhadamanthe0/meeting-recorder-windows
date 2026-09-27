@@ -55,7 +55,7 @@ struct Playback {
 impl Playback {
     fn start(files: &[PathBuf], from_us: i64) -> Option<Playback> {
         let at = format!("{:.3}", from_us as f64 / 1_000_000.0);
-        let mut ffmpeg = Command::new("ffmpeg");
+        let mut ffmpeg = Command::new(export::ffmpeg());
         ffmpeg.args(["-v", "error", "-nostdin"]);
         for file in files {
             ffmpeg.args(["-ss", &at, "-i"]).arg(file);
@@ -138,7 +138,7 @@ fn die_with_parent(command: &mut Command) -> &mut Command {
 /// Length of an audio file in microseconds, from ffprobe.
 #[cfg(target_os = "linux")]
 fn probe_duration_us(path: &Path) -> i64 {
-    Command::new("ffprobe")
+    Command::new(export::ffprobe())
         .args([
             "-v",
             "error",
@@ -252,7 +252,7 @@ fn die_with_parent(command: &mut Command) -> &mut Command {
 /// files directly.
 #[cfg(target_os = "windows")]
 fn have_ffmpeg() -> bool {
-    Command::new("ffmpeg")
+    Command::new(export::ffmpeg())
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -275,7 +275,7 @@ struct FfmpegPcm {
 impl FfmpegPcm {
     fn spawn(file: &Path, from_us: i64) -> Option<Self> {
         let at = format!("{:.3}", from_us.max(0) as f64 / 1_000_000.0);
-        let mut command = Command::new("ffmpeg");
+        let mut command = Command::new(export::ffmpeg());
         command
             .args(["-v", "error", "-nostdin", "-ss", &at, "-i"])
             .arg(file)
@@ -344,7 +344,7 @@ fn probe_duration_us(path: &Path) -> i64 {
 
 #[cfg(target_os = "windows")]
 fn probe_with_ffprobe(path: &Path) -> Option<i64> {
-    Command::new("ffprobe")
+    Command::new(export::ffprobe())
         .args([
             "-v",
             "error",
@@ -363,7 +363,7 @@ fn probe_with_ffprobe(path: &Path) -> Option<i64> {
 
 #[cfg(target_os = "windows")]
 fn probe_with_ffmpeg(path: &Path) -> Option<i64> {
-    let out = Command::new("ffmpeg").arg("-i").arg(path).output().ok()?;
+    let out = Command::new(export::ffmpeg()).arg("-i").arg(path).output().ok()?;
     parse_ffmpeg_duration(&out.stderr)
 }
 
@@ -787,7 +787,7 @@ impl Player {
 /// Decodes `path` at a low rate and keeps the loudest sample per bin, scaled
 /// to 0..1 with a gentle curve so quiet speech still shows.
 fn peaks(path: &Path) -> Option<Vec<f32>> {
-    let output = Command::new("ffmpeg")
+    let output = Command::new(export::ffmpeg())
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-ac", "1", "-ar", "4000", "-f", "s16le", "-"])

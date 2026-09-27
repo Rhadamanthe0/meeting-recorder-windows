@@ -266,7 +266,7 @@ pub fn serve(
     commands: async_channel::Sender<&'static str>,
 ) {
     use interprocess::TryClone;
-    use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
+    use interprocess::local_socket::{ListenerOptions, prelude::*};
 
     let listener = match ListenerOptions::new().name(pipe_name()).create_sync() {
         Ok(listener) => listener,
@@ -275,7 +275,7 @@ pub fn serve(
             return;
         }
     };
-    let clients: Arc<Mutex<Vec<Stream>>> = Arc::default();
+    let clients: Arc<Mutex<Vec<std::sync::mpsc::SyncSender<Vec<u8>>>>> = Arc::default();
 
     let accepted = clients.clone();
     thread::spawn(move || {
@@ -284,7 +284,18 @@ pub fn serve(
                 let commands = commands.clone();
                 thread::spawn(move || read_commands(reader, &commands));
             }
-            accepted.lock().unwrap().push(stream);
+            // Un thread d'écriture par client, nourri par un canal borné :
+            // `try_send` ne bloque jamais le thread d'état.
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+            thread::spawn(move || {
+                let mut stream = stream;
+                for line in rx {
+                    if stream.write_all(&line).is_err() {
+                        break;
+                    }
+                }
+            });
+            accepted.lock().unwrap().push(tx);
         }
     });
 
@@ -309,13 +320,14 @@ pub fn serve(
             })
             .to_string()
                 + "\n";
-            // A client that cannot keep up is dropped rather than waited for.
-            // (Named pipes expose no write timeout: a local reader that keeps
-            // reading never blocks us here.)
+            // Un client qui ne suit pas est abandonné au lieu d'être attendu :
+            // `try_send` échoue dès que son canal borné est plein (~20 ms
+            // de lignes), comme le timeout d'écriture côté Linux.
+            let bytes = line.into_bytes();
             clients
                 .lock()
                 .unwrap()
-                .retain_mut(|client| client.write_all(line.as_bytes()).is_ok());
+                .retain(|client| client.try_send(bytes.clone()).is_ok());
             thread::sleep(Duration::from_millis(if recording {
                 50
             } else if busy {

@@ -353,8 +353,17 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
                 _ => break,
             };
             let need = frames.saturating_mul(desc.blockalign);
-            if need == 0 || need > (1 << 24) {
+            if need == 0 {
                 break;
+            }
+            if need > (1 << 24) {
+                // Paquet énorme : le consommer quand même, sinon GetBuffer
+                // n'est jamais libéré et on draine du silence en boucle.
+                // `read_from_device` fait ReleaseBuffer même quand le tampon
+                // est trop petit ; le contenu hors norme est tronqué.
+                raw.resize(1 << 24, 0);
+                let _ = capture.read_from_device(&mut raw);
+                continue;
             }
             raw.resize(need, 0);
             let (got, info) = match capture.read_from_device(&mut raw) {

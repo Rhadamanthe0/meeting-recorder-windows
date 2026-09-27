@@ -103,10 +103,19 @@ fn pad_to_same_length(paths: [&Path; 2]) -> std::io::Result<()> {
         std::fs::metadata(paths[1])?.len(),
     ];
     let length = sizes[0].max(sizes[1]);
+    // Un bloc d'une seconde max, réutilisé : pas d'allocation géante si une
+    // piste décroche longtemps. Contenu identique au remplissage d'un coup.
+    let one_sec = RATE as u64 * CHANNELS as u64 * 2;
+    let zeros = vec![0u8; one_sec as usize];
     for (path, size) in paths.into_iter().zip(sizes) {
         if size < length {
             let mut file = OpenOptions::new().append(true).open(path)?;
-            file.write_all(&vec![0u8; (length - size) as usize])?;
+            let mut remaining = length - size;
+            while remaining > 0 {
+                let n = remaining.min(one_sec) as usize;
+                file.write_all(&zeros[..n])?;
+                remaining -= n as u64;
+            }
         }
     }
     Ok(())

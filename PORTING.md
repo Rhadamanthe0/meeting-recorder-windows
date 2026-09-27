@@ -44,3 +44,13 @@ et les messages d'aide gardent l'ancien nom. Doc et script suivent le réel.
 - Resampling WASAPI linéaire, pas de DSP dédié.
 - `ffmpeg.exe` requis pour un seek précis et les formes d'onde.
 - Transcription CPU longue ; Vulkan OPT-IN (`--features vulkan`).
+
+## Limites connues V1 (relecture, non corrigées)
+
+- A la fermeture du son, les pistes s'arrêtent avant le flux : l'ordre compte.
+- Un format audio inhabituel donne du silence au lieu d'une erreur visible.
+- Les modèles sont rangés sous Roaming, pas sous le dossier local attendu.
+- Les lettres accentuées des noms peuvent être remplacées à l'export.
+- La console Windows lance les outils sans reprendre tous les réglages.
+- En ligne de commande, un texte collé trop long est coupé sans prévenir.
+- Certains noms réservés Windows (CON, PRN, AUX) ne sont pas filtrés.

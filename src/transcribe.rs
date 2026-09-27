@@ -103,7 +103,7 @@ pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(crate::export::ffmpeg())
         .args(["-nostdin", "-loglevel", "error", "-i"])
         .arg(path)
         .args([
