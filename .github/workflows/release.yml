@@ -132,9 +132,15 @@ jobs:
       - name: Build release (Vulkan OFF by default)
         run: cargo build --release
 
-      # DLL ORT à côté de l'exe (copy-dylibs d'ort-sys ne vise pas target/release).
+      # Remplace les symlinks copy-dylibs par de vrais fichiers DLL (symlink-safe).
       - name: Copie DLL ORT vers target/release
-        run: Copy-Item (Join-Path $env:ORT_LIB_LOCATION "*.dll") "target/release/" -Force
+        run: |
+          Get-ChildItem (Join-Path $env:ORT_LIB_LOCATION "*.dll") | ForEach-Object {
+            $dest = Join-Path "target/release/" $_.Name
+            if (Test-Path $dest) { Remove-Item $dest -Force }
+            Copy-Item $_.FullName $dest -Force
+          }
+          Write-Output "[ci] DLL ORT copiées vers target/release"
 
       # Lock régénéré à récupérer pour le committer ensuite.
       - name: Upload Cargo.lock régénéré
