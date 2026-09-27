@@ -46,10 +46,10 @@ $SystemDlls = New-Object System.Collections.Generic.HashSet[string]([System.Stri
     "powrprof.dll", "propsys.dll", "psapi.dll", "rpcrt4.dll", "sechost.dll",
     "setupapi.dll", "shcore.dll", "shell32.dll", "shlwapi.dll", "ucrtbase.dll",
     "user32.dll", "userenv.dll", "usp10.dll", "uxtheme.dll", "version.dll",
-    "winmm.dll", "winspool.dll", "ws2_32.dll", "wtsapi32.dll", "dwrite.dll",
+    "winmm.dll", "winspool.drv", "ws2_32.dll", "wtsapi32.dll", "dwrite.dll",
     "windowscodecs.dll", "winhttp.dll", "wininet.dll", "urlmon.dll",
     "dbghelp.dll", "ncrypt.dll", "profapi.dll", "secur32.dll",
-    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"
+    "d3d12.dll", "wldap32.dll", "bcryptprimitives.dll"
 ) | ForEach-Object { [void]$SystemDlls.Add($_) }
 
 function Test-SystemDll([string]$name) {
@@ -61,11 +61,20 @@ function Test-SystemDll([string]$name) {
 # Imports directs d'un binaire via objdump (noms de DLL uniques).
 function Get-DllImports([string]$file) {
     $out = & $objdump -p $file 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "objdump -p a échoué sur '$file' (exit $LASTEXITCODE)."
+    }
     $found = @()
     foreach ($line in $out) {
         if ($line -match "DLL Name:\s*(\S+)") { $found += $Matches[1] }
     }
-    return $found | Sort-Object -Unique
+    $unique = $found | Sort-Object -Unique
+    if (-not $unique) {
+        Write-Warning "Aucun import 'DLL Name:' trouvé dans '$file'."
+        return @()
+    }
+    Write-Verbose "[stage] imports $($unique.Count) : $(Split-Path $file -Leaf)"
+    return $unique
 }
 
 # --- (Re)crée un stage vide ---
@@ -108,41 +117,44 @@ foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll
 # Parcours en largeur : chaque DLL copiée depuis UCRT_BIN est à son tour analysée.
 # CRT Visual C++ exigé par onnxruntime officiel (MSVCP140_1.dll importée par
 # onnxruntime.dll) : absent de ucrt64/bin et non bundlable via MSYS2, présent dans
-# %SystemRoot%\System32 sur les runners CI (VS installé). Repli limité à ces 3 DLL
+# %SystemRoot%\System32 sur les runners CI (VS installé). Repli limité à ces DLL
 # CRT : déploiement app-local autorisé par la licence VC++ Redist.
 $CrtSystemFallback = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
-@("msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140_1.dll") | ForEach-Object { [void]$CrtSystemFallback.Add($_) }
+@("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140.dll", "vcruntime140_1.dll") | ForEach-Object { [void]$CrtSystemFallback.Add($_) }
 $copied = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 Get-ChildItem -LiteralPath $Stage -Filter "*.dll" | ForEach-Object { [void]$copied.Add($_.Name) }
 $queue = New-Object System.Collections.Generic.Queue[string]
 Get-ChildItem -LiteralPath $Stage -Filter "*.dll" | ForEach-Object { $queue.Enqueue($_.FullName) }
 $queue.Enqueue((Join-Path $Stage "meeting-recorder-windows.exe"))
-while ($queue.Count -gt 0) {
-    $file = $queue.Dequeue()
-    foreach ($dep in (Get-DllImports $file)) {
-        if (Test-SystemDll $dep) { continue }          # fournie par Windows
-        if ($copied.Contains($dep)) { continue }       # déjà au stage
-        $src = Join-Path $UcrtBin $dep
-        if (-not (Test-Path -LiteralPath $src)) {
-            if ($CrtSystemFallback.Contains($dep)) {
-                $sysSrc = Join-Path (Join-Path $env:SystemRoot "System32") $dep
-                if (Test-Path -LiteralPath $sysSrc) {
-                    $dest = Join-Path $Stage $dep
-                    if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
-                    Copy-Item -LiteralPath $sysSrc -Destination $dest -Force
-                    Write-Output "[stage] + $dep (CRT systeme)"
-                    [void]$copied.Add($dep)
-                    $queue.Enqueue((Join-Path $Stage $dep))
-                    continue
+function Expand-StageQueue {
+    while ($queue.Count -gt 0) {
+        $file = $queue.Dequeue()
+        foreach ($dep in (Get-DllImports $file)) {
+            if (Test-SystemDll $dep) { continue }          # fournie par Windows
+            if ($copied.Contains($dep)) { continue }       # déjà au stage
+            $src = Join-Path $UcrtBin $dep
+            if (-not (Test-Path -LiteralPath $src)) {
+                if ($CrtSystemFallback.Contains($dep)) {
+                    $sysSrc = Join-Path (Join-Path $env:SystemRoot "System32") $dep
+                    if (Test-Path -LiteralPath $sysSrc) {
+                        $dest = Join-Path $Stage $dep
+                        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
+                        Copy-Item -LiteralPath $sysSrc -Destination $dest -Force
+                        Write-Output "[stage] + $dep (CRT systeme)"
+                        [void]$copied.Add($dep)
+                        $queue.Enqueue((Join-Path $Stage $dep))
+                        continue
+                    }
                 }
+                Write-Error "DLL requise introuvable : '$dep' (importée par '$(Split-Path $file -Leaf)', absente de '$UcrtBin'). Installez le paquet MSYS2 UCRT64 correspondant."
             }
-            Write-Error "DLL requise introuvable : '$dep' (importée par '$(Split-Path $file -Leaf)', absente de '$UcrtBin'). Installez le paquet MSYS2 UCRT64 correspondant."
+            Copy-ToStage $src $dep
+            [void]$copied.Add($dep)
+            $queue.Enqueue((Join-Path $Stage $dep))
         }
-        Copy-ToStage $src $dep
-        [void]$copied.Add($dep)
-        $queue.Enqueue((Join-Path $Stage $dep))
     }
 }
+Expand-StageQueue
 
 # --- 5. Données GTK indispensables ---
 # Schémas GSettings : sources XML copiées puis recompilées (gschemas.compiled).
@@ -228,6 +240,14 @@ foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
 $ffVersion = (& (Join-Path $Stage "ffmpeg.exe") -version 2>$null | Select-Object -First 1)
 if (-not $ffVersion) { Write-Error "Le ffmpeg du stage ne démarre pas (binaire corrompu ?)." }
 Write-Output "[stage] ffmpeg : $ffVersion"
+
+# --- 6b. Seconde passe : binaires arrivés après la BFS principale ---
+# ffmpeg/ffprobe (et toute DLL copiée sous stage/ après coup) doivent voir
+# leurs imports résolus avec la même règle système et la même erreur explicite.
+Get-ChildItem -LiteralPath $Stage -Include "*.exe", "*.dll" -Recurse -File |
+    Where-Object { -not $copied.Contains($_.Name) -and $_.Name -ne "meeting-recorder-windows.exe" } |
+    ForEach-Object { [void]$copied.Add($_.Name); $queue.Enqueue($_.FullName) }
+Expand-StageQueue
 
 # --- 7. Vérification finale explicite ---
 $required = @("meeting-recorder-windows.exe", "onnxruntime.dll",

@@ -203,11 +203,75 @@ jobs:
           $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
+          # Diagnostic imports manquants (lecture seule, ne fait jamais échouer).
+          try {
+            $diagObjdump = Join-Path $env:UCRT_BIN "objdump.exe"
+            if (-not (Test-Path -LiteralPath $diagObjdump)) {
+              Write-Warning "[diag] objdump introuvable ($diagObjdump), diagnostic ignoré"
+            } else {
+              $diagDir = Split-Path $exe -Parent
+              $diagSys32 = Join-Path $env:SystemRoot "System32"
+              $diagSys = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+              @(
+                "advapi32.dll", "avrt.dll", "bcrypt.dll", "cfgmgr32.dll", "comctl32.dll",
+                "comdlg32.dll", "crypt32.dll", "cryptbase.dll", "d2d1.dll", "d3d11.dll",
+                "dcomp.dll", "dhcpcsvc.dll", "dnsapi.dll", "dwmapi.dll", "dxgi.dll",
+                "fwpuclnt.dll", "gdi32.dll", "gdiplus.dll", "hid.dll", "imm32.dll",
+                "iphlpapi.dll", "kernel32.dll", "kernelbase.dll", "ksuser.dll",
+                "mmdevapi.dll", "msimg32.dll", "msvcrt.dll", "mswsock.dll", "netapi32.dll",
+                "nsi.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll", "opengl32.dll",
+                "powrprof.dll", "propsys.dll", "psapi.dll", "rpcrt4.dll", "sechost.dll",
+                "setupapi.dll", "shcore.dll", "shell32.dll", "shlwapi.dll", "ucrtbase.dll",
+                "user32.dll", "userenv.dll", "usp10.dll", "uxtheme.dll", "version.dll",
+                "winmm.dll", "winspool.drv", "ws2_32.dll", "wtsapi32.dll", "dwrite.dll",
+                "windowscodecs.dll", "winhttp.dll", "wininet.dll", "urlmon.dll",
+                "dbghelp.dll", "ncrypt.dll", "profapi.dll", "secur32.dll",
+                "d3d12.dll", "wldap32.dll", "bcryptprimitives.dll"
+              ) | ForEach-Object { [void]$diagSys.Add($_) }
+              $diagPresent = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+              Get-ChildItem -LiteralPath $diagDir -Include "*.exe", "*.dll" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { [void]$diagPresent.Add($_.Name) }
+              $diagSeen = @{}
+              $diagQueue = New-Object System.Collections.Generic.Queue[string]
+              $diagQueue.Enqueue($exe)
+              $diagSeen[$exe.ToLowerInvariant()] = $true
+              while ($diagQueue.Count -gt 0) {
+                $diagFile = $diagQueue.Dequeue()
+                $diagOut = & $diagObjdump -p $diagFile 2>$null
+                foreach ($diagLine in $diagOut) {
+                  if ($diagLine -match "DLL Name:\s*(\S+)") {
+                    $diagDep = $Matches[1]
+                    $diagLower = $diagDep.ToLowerInvariant()
+                    if ($diagSys.Contains($diagDep) -or $diagLower.StartsWith("api-ms-") -or $diagLower.StartsWith("ext-ms-")) { continue }
+                    if ($diagPresent.Contains($diagDep)) {
+                      $diagFull = Get-ChildItem -Path $diagDir -Filter $diagDep -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                      if ($diagFull -and -not $diagSeen.ContainsKey($diagFull.FullName.ToLowerInvariant())) {
+                        $diagSeen[$diagFull.FullName.ToLowerInvariant()] = $true
+                        $diagQueue.Enqueue($diagFull.FullName)
+                      }
+                      continue
+                    }
+                    if (Test-Path -LiteralPath (Join-Path $diagSys32 $diagDep)) { continue }
+                    Write-Output "[diag] import manquant : $diagDep (importé par $(Split-Path $diagFile -Leaf))"
+                  }
+                }
+              }
+            }
+          } catch {
+            Write-Warning "[diag] diagnostic imports impossible : $($_.Exception.Message)"
+          }
           & $exe --help
           if ($LASTEXITCODE -ne 0) { throw "exe --help exit $LASTEXITCODE (closure DLL incomplète ?)" }
           Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
           $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { Write-Warning "msiexec /x exit $($uninstall.ExitCode)" }
+
+      - name: Upload msi-stage (diagnostic closure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-stage
+          if-no-files-found: warn
+          path: packaging/windows/stage/
 
       - name: Upload MSI Windows x86_64
         uses: actions/upload-artifact@v4
