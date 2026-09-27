@@ -246,8 +246,9 @@ Write-Output "[stage] ffmpeg : $ffVersion"
 # --- 6b. Seconde passe : binaires arrivés après la BFS principale ---
 # ffmpeg/ffprobe (et toute DLL copiée sous stage/ après coup) doivent voir
 # leurs imports résolus avec la même règle système et la même erreur explicite.
-Get-ChildItem -LiteralPath $Stage -Include "*.exe", "*.dll" -Recurse -File |
-    Where-Object { -not $copied.Contains($_.Name) -and $_.Name -ne "meeting-recorder-windows.exe" } |
+# -Include non fiable sous Windows PowerShell 5.1 avec -LiteralPath sur un dossier : filtre par extension.
+Get-ChildItem -LiteralPath $Stage -Recurse -File |
+    Where-Object { ($_.Extension -eq '.exe' -or $_.Extension -eq '.dll') -and -not $copied.Contains($_.Name) -and $_.Name -ne "meeting-recorder-windows.exe" } |
     ForEach-Object { [void]$copied.Add($_.Name); $queue.Enqueue($_.FullName) }
 Expand-StageQueue
 
