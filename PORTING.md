@@ -23,21 +23,23 @@ diarisation Nemotron ONNX, résumé via LM Studio/Ollama OpenAI-compatible).
   `http://localhost:1234/v1` puis Ollama `http://localhost:11434/v1`,
   config `llm_base_url` / `llm_model` (défaut `qwen3-4b-instruct`), sans outils.
 - `hyprctl`/bar-widget neutralisés (`should_offer() == false` sur Windows).
-- Packaging V1 : `README.md` (fork), `install.ps1` idempotent,
-  `.github/workflows/windows.yml` (CI `windows-latest`), `.gitignore` complété.
+- Packaging V1 : `README.md` (fork), MSI per-user WiX v3 (`packaging/windows/`,
+  construit en CI, publié en release ; `MeetingRecorder-<version>.msi`,
+  double-clic sans admin) + voie source avancée (Rust GNU, MSYS2 UCRT64,
+  ffmpeg, `cargo build --release`), `.github/workflows/windows.yml`
+  (CI `windows-latest`), `.gitignore` complété.
 
 Écart de nommage connu (réel, cf. `src/main.rs:27`) : le binaire Cargo est
 `meeting-recorder-windows`, mais `APP_NAME` vaut encore
 `omarchy-meeting-recorder` — les dossiers `%APPDATA%\omarchy-meeting-recorder\`
-et les messages d'aide gardent l'ancien nom. Doc et script suivent le réel.
+et les messages d'aide gardent l'ancien nom. La doc suit le réel.
 
 ## Reste (hors V1)
 
-1. MSI/WiX (aucun installeur ; binaire + `install.ps1` uniquement).
-2. Icône tray Windows.
-3. Job Object pour les enfants `ffmpeg.exe` (orphelins possibles sur crash).
-4. Tests audio réels (matériel WASAPI) ; seuls les tests unitaires/logiques existent.
-5. Build GTK validé par CI (workflow présent, jamais encore vert ici).
+1. Icône tray Windows.
+2. Job Object pour les enfants `ffmpeg.exe` (orphelins possibles sur crash).
+3. Tests audio réels (matériel WASAPI) ; seuls les tests unitaires/logiques existent.
+4. Build GTK validé par CI (workflow présent, jamais encore vert ici).
 
 ## Limites connues
 
