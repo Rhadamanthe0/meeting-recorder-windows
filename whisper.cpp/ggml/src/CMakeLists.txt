@@ -501,3 +501,12 @@ if (TARGET ggml-cpu)
             LIBRARY DESTINATION lib
             RUNTIME DESTINATION bin)
 endif()
+
+# meeting-recorder-windows : restaure le préfixe "lib" sous MinGW, sinon
+# GNU ld ne résout pas -lggml (ggml.a au lieu de libggml.a). MSVC inchangé.
+if (MINGW)
+    set_target_properties(ggml ggml-base PROPERTIES PREFIX "lib")
+    if (TARGET ggml-cpu)
+        set_target_properties(ggml-cpu PROPERTIES PREFIX "lib")
+    endif()
+endif()
