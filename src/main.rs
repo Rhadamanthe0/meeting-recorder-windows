@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 //! Meeting Recorder: records a meeting in two tracks (mic and computer
 //! audio), transcribes it with whisper.cpp after the call, and streams live
 //! levels to a bar widget.
@@ -26,25 +27,22 @@ use gtk::glib;
 pub const APP_ID: &str = "com.jankeesvw.OmarchyMeetingRecorder";
 pub const APP_NAME: &str = "omarchy-meeting-recorder";
 
-// Cache la fenêtre console en mode GUI (Windows uniquement). Erreurs
-// ignorées silencieusement : pas de log, pas de panic si pas de console.
+// Rattache la console du processus parent (terminal/pipes CLI) quand elle
+// existe. Double-clic GUI : aucune console créée (windows_subsystem).
+// Erreurs ignorées silencieusement : pas de log, pas de panic.
 #[cfg(windows)]
-fn hide_console_window() {
-    use windows_sys::Win32::System::Console::GetConsoleWindow;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     unsafe {
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_null() {
-            ShowWindow(hwnd, SW_HIDE);
-        }
+        AttachConsole(ATTACH_PARENT_PROCESS);
     }
 }
 
 fn main() -> glib::ExitCode {
+    #[cfg(windows)]
+    attach_parent_console();
     match std::env::args().nth(1).as_deref() {
         None => {
-            #[cfg(windows)]
-            hide_console_window();
             ui::run(None)
         }
         Some("--version" | "-V") => {
@@ -79,8 +77,6 @@ fn main() -> glib::ExitCode {
             if ipc::send("new-window") {
                 glib::ExitCode::SUCCESS
             } else {
-                #[cfg(windows)]
-                hide_console_window();
                 ui::run(None)
             }
         }
@@ -111,8 +107,6 @@ fn main() -> glib::ExitCode {
             if path.ends_with(&format!(".{}", meeting::EXTENSION))
                 || std::path::Path::new(path).is_dir() =>
         {
-            #[cfg(windows)]
-            hide_console_window();
             ui::run(Some(path))
         }
         Some(other) => {

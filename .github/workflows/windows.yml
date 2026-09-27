@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
+      GGML_NATIVE: "OFF"
     defaults:
       run:
         shell: pwsh
@@ -260,8 +263,11 @@ jobs:
           } catch {
             Write-Warning "[diag] diagnostic imports impossible : $($_.Exception.Message)"
           }
-          & $exe --help
-          if ($LASTEXITCODE -ne 0) { throw "exe --help exit $LASTEXITCODE (closure DLL incomplète ?)" }
+          # Exe GUI (windows_subsystem) : PowerShell n'attend pas et ne capte
+          # rien avec `& $exe --help`, d'où Start-Process + pipe fichier.
+          $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
+          if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
+          if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt (console GUI non rattachée ?)" }
           Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
           $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { Write-Warning "msiexec /x exit $($uninstall.ExitCode)" }
