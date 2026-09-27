@@ -48,6 +48,7 @@ $SystemDlls = New-Object System.Collections.Generic.HashSet[string]([System.Stri
     "user32.dll", "userenv.dll", "usp10.dll", "uxtheme.dll", "version.dll",
     "winmm.dll", "winspool.dll", "ws2_32.dll", "wtsapi32.dll", "dwrite.dll",
     "windowscodecs.dll", "winhttp.dll", "wininet.dll", "urlmon.dll",
+    "dbghelp.dll", "ncrypt.dll", "profapi.dll", "secur32.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"
 ) | ForEach-Object { [void]$SystemDlls.Add($_) }
 
