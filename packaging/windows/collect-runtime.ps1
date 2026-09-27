@@ -35,14 +35,15 @@ if (-not (Test-Path -LiteralPath $schemaCompiler)) {
 # --- DLLs système Windows : jamais embarquées (fournies par l'OS) ---
 # Liste explicite (insensible à la casse) + préfixes api-ms-*/ext-ms-*.
 # combase.dll : inbox Win10+, COM de base (importée via crate windows/WASAPI).
+# avicap32/avifil32/msvfw32 : VFW inbox, importées par ffmpeg/ffprobe Gyan.
 $SystemDlls = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 @(
-    "advapi32.dll", "avrt.dll", "bcrypt.dll", "cfgmgr32.dll", "combase.dll", "comctl32.dll",
+    "advapi32.dll", "avicap32.dll", "avifil32.dll", "avrt.dll", "bcrypt.dll", "cfgmgr32.dll", "combase.dll", "comctl32.dll",
     "comdlg32.dll", "crypt32.dll", "cryptbase.dll", "d2d1.dll", "d3d11.dll",
     "dcomp.dll", "dhcpcsvc.dll", "dnsapi.dll", "dwmapi.dll", "dxgi.dll",
     "fwpuclnt.dll", "gdi32.dll", "gdiplus.dll", "hid.dll", "imm32.dll",
     "iphlpapi.dll", "kernel32.dll", "kernelbase.dll", "ksuser.dll",
-    "mmdevapi.dll", "msimg32.dll", "msvcrt.dll", "mswsock.dll", "netapi32.dll",
+    "mmdevapi.dll", "msimg32.dll", "msvcrt.dll", "msvfw32.dll", "mswsock.dll", "netapi32.dll",
     "nsi.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll", "opengl32.dll",
     "powrprof.dll", "propsys.dll", "psapi.dll", "rpcrt4.dll", "sechost.dll",
     "setupapi.dll", "shcore.dll", "shell32.dll", "shlwapi.dll", "ucrtbase.dll",
