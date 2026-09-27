@@ -115,6 +115,15 @@ jobs:
       - name: Test
         run: cargo test
 
+      # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
+      - name: Diagnostic libs statiques
+        if: always()
+        run: |
+          Write-Output "[ci] OUT_DIR whisper-rs-sys :"
+          Get-ChildItem -Path "target/debug/build" -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("[ci] out: " + $_.FullName) }
+          Write-Output "[ci] libs statiques sous target/ :"
+          Get-ChildItem -Path "target" -Include *.a,*.lib -Recurse -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Output ("[ci] lib: " + $_.FullName + " (" + $_.Length + " o)") }
+
       - name: Build release (Vulkan OFF by default)
         run: cargo build --release
 
