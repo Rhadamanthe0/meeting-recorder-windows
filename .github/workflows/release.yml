@@ -46,15 +46,20 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-clang
 
-      # ffmpeg recommandé : non bloquant.
+      # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
       - name: Install ffmpeg
         run: |
-          try {
-            winget install --exact --silent --accept-source-agreements --accept-package-agreements Gyan.FFmpeg
-          } catch {
-            Write-Warning "[ci] install ffmpeg impossible, on continue sans (non bloquant) : $($_.Exception.Message)"
+          winget install --exact --accept-source-agreements --accept-package-agreements Gyan.FFmpeg
+          $ff = $null
+          try { $ff = (Get-Command ffmpeg.exe -ErrorAction Stop).Source } catch {}
+          if (-not $ff) {
+            $pkg = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+            if (Test-Path $pkg) { $ff = Get-ChildItem -Path $pkg -Filter "ffmpeg.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName } }
           }
-          exit 0
+          if (-not $ff -or -not (Test-Path $ff)) { throw "ffmpeg.exe introuvable après winget install Gyan.FFmpeg" }
+          Split-Path $ff -Parent >> $env:GITHUB_PATH
+          & $ff -version | Select-Object -First 2
+          Write-Output "[ci] ffmpeg=$ff"
 
       - name: Expose GTK au build GNU
         run: |
