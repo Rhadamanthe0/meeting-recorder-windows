@@ -89,6 +89,7 @@ jobs:
           "PKG_CONFIG_PATH=$ucrt\lib\pkgconfig;$ucrt\share\pkgconfig" >> $env:GITHUB_ENV
           # bindgen (whisper-rs) exige libclang.dll via LIBCLANG_PATH (ucrt64/bin).
           "LIBCLANG_PATH=$bindir" >> $env:GITHUB_ENV
+          "UCRT_BIN=$bindir" >> $env:GITHUB_ENV
           try { Copy-Item -LiteralPath $p -Destination (Join-Path $bindir "pkg-config.exe") } catch { Write-Warning "[ci] copie pkg-config.exe impossible, on continue : $($_.Exception.Message)" }
           Write-Output "[ci] pkgconf=$p"
 
@@ -142,6 +143,15 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
+      # Runtime MinGW requis par l'exe GNU (libstdc++ via sa chaîne gcc).
+      - name: Bundle DLLs runtime MinGW
+        run: |
+          foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
+            $src = Join-Path $env:UCRT_BIN $dll
+            Copy-Item -LiteralPath $src -Destination "target/release/" -Force -ErrorAction SilentlyContinue
+            if (Test-Path (Join-Path "target/release/" $dll)) { Write-Output "[ci] runtime MinGW copié : $dll" }
+          }
+
       # Lock régénéré à récupérer pour le committer ensuite.
       - name: Upload Cargo.lock régénéré
         uses: actions/upload-artifact@v4
@@ -158,6 +168,9 @@ jobs:
           path: |
             target/release/meeting-recorder-windows.exe
             target/release/onnxruntime.dll
+            target/release/libstdc++-6.dll
+            target/release/libgcc_s_seh-1.dll
+            target/release/libwinpthread-1.dll
             target/release/*.dll
             README.md
             install.ps1
@@ -179,6 +192,9 @@ jobs:
           files: |
             dist/**/meeting-recorder-windows.exe
             dist/**/onnxruntime.dll
+            dist/**/libstdc++-6.dll
+            dist/**/libgcc_s_seh-1.dll
+            dist/**/libwinpthread-1.dll
             dist/**/*.dll
             dist/**/README.md
             dist/**/install.ps1

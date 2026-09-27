@@ -21,6 +21,14 @@ Dépôt : https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
 
 ## Installation depuis GitHub
 
+Voie 1 — RECOMMANDÉE (release) : téléchargez les assets de
+https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows/releases
+(exe + DLLs) puis vérifiez les prérequis runtime :
+MSYS2 UCRT64 installé, `C:\msys64\ucrt64\bin` au PATH, ffmpeg installé,
+LM Studio ou Ollama lancé en local.
+
+Voie 2 (source) : clone + script qui installe tout, puis build :
+
 ```powershell
 git clone https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
 cd omarchy-meeting-recorder-windows
@@ -28,6 +36,8 @@ cd omarchy-meeting-recorder-windows
 cargo build --release
 .\target\release\meeting-recorder-windows.exe
 ```
+
+`.\install.ps1` installe tout : Rust GNU, MSYS2/GTK, ffmpeg.
 
 Besoin de GTK4/MSYS2 ? Suivez `install.ps1` et la CI (`.github/workflows/windows.yml`).
 
@@ -63,6 +73,8 @@ llm_model = "qwen3-4b-instruct"
 
 - ffmpeg requis pour un seek précis et les formes d'onde.
 - Transcription longue sur CPU possible.
+- Modèle défaut large-v3-turbo (~1,6 Go téléchargés, lent sur CPU : prévoir large pour une longue réunion).
+- Pour tester vite : `model = "small"` dans config.toml.
 - Pas d'installeur, binaire + `install.ps1` uniquement.
 
 D'après [omarchy-meeting-recorder](https://github.com/jankeesvw/omarchy-meeting-recorder). Licence MIT, voir `LICENSE`.
