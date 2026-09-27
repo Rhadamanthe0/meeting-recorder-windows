@@ -35,5 +35,5 @@ name = "meeting-recorder-windows"
 path = "src/main.rs"
 
 [patch.crates-io]
-# whisper-rs-sys 0.15.0 + /utf-8 restreint à MSVC (build GNU/MinGW) : https://github.com/Rhadamanthe0/whisper-rs-sys
-whisper-rs-sys = { git = "https://github.com/Rhadamanthe0/whisper-rs-sys", rev = "88c4d54762da0b1166548e5ba4ca3896cfc71677" }
+# whisper-rs-sys 0.15.0 vendored sous third-party/ (+3 patchs GNU/MinGW, voir son historique) : pas de dépendance réseau.
+whisper-rs-sys = { path = "third-party/whisper-rs-sys" }
