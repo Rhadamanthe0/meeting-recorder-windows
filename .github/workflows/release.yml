@@ -143,15 +143,6 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # Runtime MinGW requis par l'exe GNU (libstdc++ via sa chaîne gcc).
-      - name: Bundle DLLs runtime MinGW
-        run: |
-          foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
-            $src = Join-Path $env:UCRT_BIN $dll
-            Copy-Item -LiteralPath $src -Destination "target/release/" -Force -ErrorAction SilentlyContinue
-            if (Test-Path (Join-Path "target/release/" $dll)) { Write-Output "[ci] runtime MinGW copié : $dll" }
-          }
-
       # Lock régénéré à récupérer pour le committer ensuite.
       - name: Upload Cargo.lock régénéré
         uses: actions/upload-artifact@v4
@@ -160,44 +151,66 @@ jobs:
           if-no-files-found: warn
           path: Cargo.lock
 
-      - name: Upload artefact Windows x86_64
+      # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
+      # seulement si candle est absent.
+      - name: Install WiX v3 (MSI)
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset -y --no-progress
+          }
+          $wixBin = $null
+          foreach ($dir in @("C:\Program Files (x86)\WiX Toolset v3.14\bin", "C:\Program Files (x86)\WiX Toolset v3.11\bin")) {
+            if (Test-Path -LiteralPath $dir) { $wixBin = $dir; break }
+          }
+          if (-not $wixBin) { throw "candle.exe introuvable après choco install wixtoolset" }
+          $wixBin >> $env:GITHUB_PATH
+          $env:PATH = "$wixBin;$env:PATH"
+          candle.exe -? | Select-Object -First 2
+
+      # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
+      # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
+      # Version = tag déclencheur sans le v initial, sinon 0.1.0.
+      - name: Build MSI
+        run: |
+          $version = "0.1.0"
+          $ref = $env:GITHUB_REF_NAME
+          if ($ref -match '^v?(\d+(?:\.\d+)*)$') {
+            $parts = @($Matches[1] -split '\.')
+            while ($parts.Count -lt 3) { $parts += "0" }
+            $version = ($parts[0..2] -join ".")
+          }
+          Write-Output "[ci] msi version=$version (ref=$ref)"
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/collect-runtime.ps1
+          Set-Location packaging/windows
+          heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
+          candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
+          light -ext WixUIExtension "-out:MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
+          Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
+
+      - name: Upload MSI Windows x86_64
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64
+          name: windows-msi
           if-no-files-found: error
-          path: |
-            target/release/meeting-recorder-windows.exe
-            target/release/onnxruntime.dll
-            target/release/libstdc++-6.dll
-            target/release/libgcc_s_seh-1.dll
-            target/release/libwinpthread-1.dll
-            target/release/*.dll
-            README.md
-            install.ps1
+          path: packaging/windows/*.msi
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download artefact Windows x86_64
+      - name: Download MSI Windows x86_64
         uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64
+          name: windows-msi
           path: dist
 
-      # Version = tag déclencheur (github.ref_name). Notes auto, release finale.
+      # Le MSI embarque tout (exe + ORT + MinGW + closure GTK + ffmpeg) et
+      # remplace les anciens assets loose (exe + DLLs + script d'install).
       - name: Publie la release GitHub
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/**/meeting-recorder-windows.exe
-            dist/**/onnxruntime.dll
-            dist/**/libstdc++-6.dll
-            dist/**/libgcc_s_seh-1.dll
-            dist/**/libwinpthread-1.dll
-            dist/**/*.dll
-            dist/**/README.md
-            dist/**/install.ps1
+            dist/**/*.msi
           generate_release_notes: true
           draft: false
           prerelease: false

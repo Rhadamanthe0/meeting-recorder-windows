@@ -13,33 +13,23 @@ Dépôt : https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
 - Historique des réunions + import d'un fichier audio.
 - 0 €, rien ne sort du PC.
 
-## Prérequis
+## Installation
 
-- Windows 10/11 x64.
-- LM Studio ou Ollama (pour résumé et actions).
-- ffmpeg conseillé (`winget install Gyan.FFmpeg`).
+Voie 1 — RECOMMANDÉE (MSI) : téléchargez `MeetingRecorder-<version>.msi`
+depuis https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows/releases
+et exécutez-le (double-clic, sans admin : installation per-user).
+Tout est embarqué (GTK, ffmpeg, runtime).
+Prérequis restant : LM Studio ou Ollama lancé en local (résumé et actions).
 
-## Installation depuis GitHub
-
-Voie 1 — RECOMMANDÉE (release) : téléchargez les assets de
-https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows/releases
-(exe + DLLs) puis vérifiez les prérequis runtime :
-MSYS2 UCRT64 installé, `C:\msys64\ucrt64\bin` au PATH, ffmpeg installé,
-LM Studio ou Ollama lancé en local.
-
-Voie 2 (source) : clone + script qui installe tout, puis build :
+Voie 2 — source (avancé) : prérequis manuels Rust GNU (hôte
+x86_64-pc-windows-gnu), MSYS2 UCRT64 (GTK4/libadwaita) et ffmpeg, puis :
 
 ```powershell
 git clone https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
 cd omarchy-meeting-recorder-windows
-.\install.ps1
 cargo build --release
 .\target\release\meeting-recorder-windows.exe
 ```
-
-`.\install.ps1` installe tout : Rust GNU, MSYS2/GTK, ffmpeg.
-
-Besoin de GTK4/MSYS2 ? Suivez `install.ps1` et la CI (`.github/workflows/windows.yml`).
 
 Mise à jour (récupère les derniers commits) :
 
@@ -49,14 +39,13 @@ git pull
 
 ## Utilisation
 
-1. Lancez l'exe, enregistrez micro + PC.
+1. Lancez l'app (menu Démarrer : Meeting Recorder), enregistrez micro + PC.
 2. Transcrivez, puis demandez un résumé.
 
 ```powershell
-.\target\release\meeting-recorder-windows.exe
-.\target\release\meeting-recorder-windows.exe transcribe-file interview.mp3 --speakers 2 > transcript.md
-Get-Content transcript.md | .\target\release\meeting-recorder-windows.exe ask "Résume en 5 points"
-.\target\release\meeting-recorder-windows.exe watch
+meeting-recorder-windows.exe transcribe-file interview.mp3 --speakers 2 > transcript.md
+Get-Content transcript.md | meeting-recorder-windows.exe ask "Résume en 5 points"
+meeting-recorder-windows.exe watch
 ```
 
 ## Config
@@ -71,10 +60,8 @@ llm_model = "qwen3-4b-instruct"
 
 ## Limites
 
-- ffmpeg requis pour un seek précis et les formes d'onde.
 - Transcription longue sur CPU possible.
 - Modèle défaut large-v3-turbo (~1,6 Go téléchargés, lent sur CPU : prévoir large pour une longue réunion).
 - Pour tester vite : `model = "small"` dans config.toml.
-- Pas d'installeur, binaire + `install.ps1` uniquement.
 
 D'après [omarchy-meeting-recorder](https://github.com/jankeesvw/omarchy-meeting-recorder). Licence MIT, voir `LICENSE`.

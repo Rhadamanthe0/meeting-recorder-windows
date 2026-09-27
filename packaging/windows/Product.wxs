@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Installeur MSI per-user (WiX v3) : aucune élévation admin requise.
+     Le contenu du dossier installé vient de packaging/windows/stage/
+     (voir collect-runtime.ps1), récolté par heat en stage-files.wxs :
+       heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd \
+         -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
+       candle -dStageDir=stage -dVersion=<x.y.z> Product.wxs stage-files.wxs
+       light -ext WixUIExtension -out MeetingRecorder-<x.y.z>.msi \
+         Product.wixobj stage-files.wixobj
+     L'exe principal est déclaré ici (raccourcis) et EXCLU de la récolte
+     par harvest.xsl pour éviter tout doublon. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Meeting Recorder" Language="1033"
+           Version="$(var.Version)" Manufacturer="Meeting Recorder"
+           UpgradeCode="7007536A-1C27-46E4-A07B-7C404FBC1968">
+    <Package InstallerVersion="200" Compressed="yes"
+             InstallScope="perUser" InstallPrivileges="limited" />
+    <!-- Upgrade propre : l'ancienne version per-user est retirée tôt. -->
+    <MajorUpgrade DowngradeErrorMessage="Une version plus récente est déjà installée."
+                  Schedule="afterInstallValidate" />
+    <MediaTemplate EmbedCab="yes" />
+    <!-- 1 = raccourci Bureau installé ; passer INSTALLDESKTOPSHORTCUT=0 à
+         msiexec pour s'en passer. -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="PerUserPrograms" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="MeetingRecorder">
+            <Component Id="MainExe" Guid="*">
+              <File Id="MainExeFile"
+                    Source="$(var.StageDir)\meeting-recorder-windows.exe"
+                    KeyPath="yes" />
+              <!-- Raccourci menu Démarrer (KeyPath registre HKCU requis). -->
+              <RegistryValue Root="HKCU" Key="Software\MeetingRecorder"
+                             Name="Installed" Value="[INSTALLFOLDER]"
+                             Type="string" KeyPath="no" />
+              <Shortcut Id="StartMenuShortcut" Directory="AppStartMenu"
+                        Name="Meeting Recorder" Target="[#MainExeFile]"
+                        WorkingDirectory="INSTALLFOLDER"
+                        Icon="AppIcon" Advertise="no" />
+            </Component>
+            <Component Id="DesktopShortcut" Guid="*">
+              <Condition>INSTALLDESKTOPSHORTCUT=1</Condition>
+              <RegistryValue Root="HKCU" Key="Software\MeetingRecorder"
+                             Name="DesktopShortcut" Value="1"
+                             Type="integer" KeyPath="yes" />
+              <Shortcut Id="DesktopShortcutLink" Directory="DesktopFolder"
+                        Name="Meeting Recorder" Target="[#MainExeFile]"
+                        WorkingDirectory="INSTALLFOLDER"
+                        Icon="AppIcon" Advertise="no" />
+            </Component>
+            <!-- Schémas GSettings compilés livrés en
+                 share\glib-2.0\schemas (voir collect-runtime.ps1). -->
+            <Component Id="EnvSchemas" Guid="*">
+              <RegistryValue Root="HKCU" Key="Software\MeetingRecorder"
+                             Name="EnvSchemas" Value="1"
+                             Type="integer" KeyPath="yes" />
+              <Environment Id="GSettingsSchemaDir" Name="GSETTINGS_SCHEMA_DIR"
+                           Value="[INSTALLFOLDER]share\glib-2.0\schemas"
+                           Part="all" Action="set" System="no" Permanent="no" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AppStartMenu" Name="Meeting Recorder" />
+      </Directory>
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <Icon Id="AppIcon" SourceFile="$(var.StageDir)\meeting-recorder-windows.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <Feature Id="Main" Title="Meeting Recorder" Level="1">
+      <ComponentRef Id="MainExe" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="EnvSchemas" />
+      <ComponentGroupRef Id="HarvestedFiles" />
+    </Feature>
+
+    <!-- Double-clic = assistant minimal ; /qn = silencieux (CI). -->
+    <UIRef Id="WixUI_Minimal" />
+  </Product>
+</Wix>

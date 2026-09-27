@@ -143,15 +143,6 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # Runtime MinGW requis par l'exe GNU (libstdc++ via sa chaîne gcc).
-      - name: Bundle DLLs runtime MinGW
-        run: |
-          foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
-            $src = Join-Path $env:UCRT_BIN $dll
-            Copy-Item -LiteralPath $src -Destination "target/release/" -Force -ErrorAction SilentlyContinue
-            if (Test-Path (Join-Path "target/release/" $dll)) { Write-Output "[ci] runtime MinGW copié : $dll" }
-          }
-
       # Lock régénéré à récupérer pour le committer ensuite.
       - name: Upload Cargo.lock régénéré
         uses: actions/upload-artifact@v4
@@ -160,17 +151,67 @@ jobs:
           if-no-files-found: warn
           path: Cargo.lock
 
-      - name: Upload artefact Windows x86_64
+      # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
+      # seulement si candle est absent.
+      - name: Install WiX v3 (MSI)
+        run: |
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset -y --no-progress
+          }
+          $wixBin = $null
+          foreach ($dir in @("C:\Program Files (x86)\WiX Toolset v3.14\bin", "C:\Program Files (x86)\WiX Toolset v3.11\bin")) {
+            if (Test-Path -LiteralPath $dir) { $wixBin = $dir; break }
+          }
+          if (-not $wixBin) { throw "candle.exe introuvable après choco install wixtoolset" }
+          $wixBin >> $env:GITHUB_PATH
+          $env:PATH = "$wixBin;$env:PATH"
+          candle.exe -? | Select-Object -First 2
+
+      # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
+      # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
+      # Version = tag sans le v initial, sinon 0.1.0 (sur master : pas de tag).
+      - name: Build MSI
+        run: |
+          $version = "0.1.0"
+          $ref = $env:GITHUB_REF_NAME
+          if ($ref -match '^v?(\d+(?:\.\d+)*)$') {
+            $parts = @($Matches[1] -split '\.')
+            while ($parts.Count -lt 3) { $parts += "0" }
+            $version = ($parts[0..2] -join ".")
+          }
+          Write-Output "[ci] msi version=$version (ref=$ref)"
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/collect-runtime.ps1
+          Set-Location packaging/windows
+          heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
+          candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
+          light -ext WixUIExtension "-out:MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
+          Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
+
+      # Preuve d'installation : MSI per-user silencieux puis lancement de
+      # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
+      # embarquée doit suffire). --help quitte avant toute init GTK.
+      - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
+        run: |
+          $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
+          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$log`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
+            throw "msiexec /i exit $($install.ExitCode)"
+          }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw "exe --help exit $LASTEXITCODE (closure DLL incomplète ?)" }
+          Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { Write-Warning "msiexec /x exit $($uninstall.ExitCode)" }
+
+      - name: Upload MSI Windows x86_64
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64
+          name: windows-msi
           if-no-files-found: error
-          path: |
-            target/release/meeting-recorder-windows.exe
-            target/release/onnxruntime.dll
-            target/release/libstdc++-6.dll
-            target/release/libgcc_s_seh-1.dll
-            target/release/libwinpthread-1.dll
-            target/release/*.dll
-            README.md
-            install.ps1
+          path: packaging/windows/*.msi

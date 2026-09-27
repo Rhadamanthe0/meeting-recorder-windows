@@ -1,0 +1,6 @@
+# Produits du build MSI (régénérables en CI) : seul le .ps1, le .wxs et le .xsl sont versionnés.
+stage/
+stage-files.wxs
+*.wixobj
+*.wixpdb
+*.msi
