@@ -5,7 +5,7 @@
        heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd \
          -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
        candle -dStageDir=stage -dVersion=<x.y.z> Product.wxs stage-files.wxs
-       light -ext WixUIExtension -out MeetingRecorder-<x.y.z>.msi \
+        light -ext WixUIExtension -o MeetingRecorder-<x.y.z>.msi \
          Product.wixobj stage-files.wixobj
      L'exe principal est déclaré ici (raccourcis) et EXCLU de la récolte
      par harvest.xsl pour éviter tout doublon. -->

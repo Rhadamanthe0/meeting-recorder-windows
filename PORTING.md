@@ -39,7 +39,7 @@ et les messages d'aide gardent l'ancien nom. La doc suit le réel.
 1. Icône tray Windows.
 2. Job Object pour les enfants `ffmpeg.exe` (orphelins possibles sur crash).
 3. Tests audio réels (matériel WASAPI) ; seuls les tests unitaires/logiques existent.
-4. Build GTK validé par CI (workflow présent, jamais encore vert ici).
+4. Build GTK validé par CI (runs Success du 2026-09-27).
 
 ## Limites connues
 
