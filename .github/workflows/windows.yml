@@ -184,7 +184,7 @@ jobs:
           Set-Location packaging/windows
           heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
           candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
-          light -ext WixUIExtension -o "MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
+          light -ext WixUIExtension -sice:ICE38 -sice:ICE43 -sice:ICE64 -o "MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
           Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
 
       # Preuve d'installation : MSI per-user silencieux puis lancement de

@@ -106,6 +106,12 @@ foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll
 
 # --- 4. Closure GTK4/libadwaita : dépendances transitives via objdump ---
 # Parcours en largeur : chaque DLL copiée depuis UCRT_BIN est à son tour analysée.
+# CRT Visual C++ exigé par onnxruntime officiel (MSVCP140_1.dll importée par
+# onnxruntime.dll) : absent de ucrt64/bin et non bundlable via MSYS2, présent dans
+# %SystemRoot%\System32 sur les runners CI (VS installé). Repli limité à ces 3 DLL
+# CRT : déploiement app-local autorisé par la licence VC++ Redist.
+$CrtSystemFallback = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+@("msvcp140_1.dll", "msvcp140_2.dll", "vcruntime140_1.dll") | ForEach-Object { [void]$CrtSystemFallback.Add($_) }
 $copied = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 Get-ChildItem -LiteralPath $Stage -Filter "*.dll" | ForEach-Object { [void]$copied.Add($_.Name) }
 $queue = New-Object System.Collections.Generic.Queue[string]
@@ -118,6 +124,18 @@ while ($queue.Count -gt 0) {
         if ($copied.Contains($dep)) { continue }       # déjà au stage
         $src = Join-Path $UcrtBin $dep
         if (-not (Test-Path -LiteralPath $src)) {
+            if ($CrtSystemFallback.Contains($dep)) {
+                $sysSrc = Join-Path (Join-Path $env:SystemRoot "System32") $dep
+                if (Test-Path -LiteralPath $sysSrc) {
+                    $dest = Join-Path $Stage $dep
+                    if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
+                    Copy-Item -LiteralPath $sysSrc -Destination $dest -Force
+                    Write-Output "[stage] + $dep (CRT systeme)"
+                    [void]$copied.Add($dep)
+                    $queue.Enqueue((Join-Path $Stage $dep))
+                    continue
+                }
+            }
             Write-Error "DLL requise introuvable : '$dep' (importée par '$(Split-Path $file -Leaf)', absente de '$UcrtBin'). Installez le paquet MSYS2 UCRT64 correspondant."
         }
         Copy-ToStage $src $dep
