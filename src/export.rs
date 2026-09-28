@@ -57,9 +57,8 @@ pub fn ffmpeg() -> PathBuf {
     tool("ffmpeg")
 }
 
-/// The ffprobe binary, found the same way. No call site yet; kept next to
-/// `ffmpeg()` so later code resolves both the same way.
-#[allow(dead_code)]
+/// The ffprobe binary, found the same way. Used by the player to probe
+/// audio durations, kept next to `ffmpeg()` so both resolve the same way.
 pub fn ffprobe() -> PathBuf {
     tool("ffprobe")
 }

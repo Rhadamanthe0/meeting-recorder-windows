@@ -337,6 +337,11 @@ struct Recorder {
     chapters_spinner: adw::Spinner,
     /// Looked up once: the default agent, if any.
     agent: std::cell::OnceCell<Option<Agent>>,
+    /// A `probe_agent` lookup in flight; the header shows a waiting state meanwhile.
+    agent_checking: Cell<bool>,
+    /// A fresh transcript waiting for the probe: auto-generate chapters once
+    /// the probe answers, if an agent is around. Consumed exactly once.
+    pending_chapters: Cell<bool>,
     generating: Cell<bool>,
     current_line: Cell<i32>,
 
@@ -794,6 +799,8 @@ impl Recorder {
             chapters_button,
             chapters_spinner,
             agent: std::cell::OnceCell::new(),
+            agent_checking: Cell::new(false),
+            pending_chapters: Cell::new(false),
             generating: Cell::new(false),
             current_line: Cell::new(-1),
             mic,
@@ -1831,6 +1838,8 @@ impl Recorder {
         self.player.unload();
         *self.result_dir.borrow_mut() = None;
         *self.manifest.borrow_mut() = None;
+        // Leaving the done page: a deferred auto-generation has no meeting to run for.
+        self.pending_chapters.set(false);
         self.title_row.set_text("");
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
@@ -2159,6 +2168,8 @@ impl Recorder {
         if let Some(dir) = self.result_dir.borrow().as_ref() {
             self.player.load(dir);
         }
+        // The LLM probe runs in the background: the done page stays reactive.
+        self.probe_agent();
         self.show_transcript(text.as_deref(), problem.as_deref());
         self.transcript_scroll.vadjustment().set_value(0.0);
         if let Some(problem) = problem {
@@ -2166,9 +2177,12 @@ impl Recorder {
         } else {
             self.window.set_default_widget(Some(&self.copy_button));
             self.copy_button.grab_focus();
-            // A fresh transcript gets chapters when an agent is around.
+            // A fresh transcript gets chapters when an agent is around. While
+            // the probe is still checking, defer it to the probe callback.
             if self.can_have_chapters() {
                 self.generate_chapters();
+            } else if self.agent_checking.get() {
+                self.pending_chapters.set(true);
             }
         }
         if self.quit_when_done.get()
@@ -2247,6 +2261,11 @@ impl Recorder {
             .is_none()
             .then_some("This meeting has no transcript yet.");
         self.player.load(&dir);
+        // An opened meeting never auto-generates: drop a deferred request
+        // from a previous fresh transcript.
+        self.pending_chapters.set(false);
+        // The LLM probe runs in the background: the done page stays reactive.
+        self.probe_agent();
         self.show_transcript(text.as_deref(), problem);
         self.transcript_scroll.vadjustment().set_value(0.0);
         // Never leave the focus in the name: typing would rename the meeting.
@@ -2367,8 +2386,38 @@ impl Recorder {
         self.done_meta.set_visible(!meta.is_empty());
     }
 
+    /// The cached lookup; never probes. `agent::status` can block on the
+    /// network for seconds per server, so the probe runs in `probe_agent`
+    /// (background) instead of on the UI thread.
     fn default_agent(&self) -> Option<Agent> {
-        self.agent.get_or_init(agent::default_agent).clone()
+        self.agent.get().and_then(|cached| cached.clone())
+    }
+
+    /// Probes for the default agent off the UI thread and refreshes the
+    /// chapters header when it answers. While probing, the Generate button
+    /// stays disabled with a "Checking local LLM…" note. A no-op once probed.
+    fn probe_agent(self: &Rc<Self>) {
+        if self.agent.get().is_some() {
+            return;
+        }
+        if self.agent_checking.replace(true) {
+            return;
+        }
+        self.update_chapters_header(!self.chapter_starts.borrow().is_empty());
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let probed = gio::spawn_blocking(agent::status).await;
+            let _ = this.agent.set(probed.ok().and_then(|result| result.ok()));
+            this.agent_checking.set(false);
+            this.update_chapters_header(!this.chapter_starts.borrow().is_empty());
+            // A fresh transcript arrived while probing: restore the upstream
+            // auto-generation now that the agent is known. Consumed once; the
+            // `generating` guard keeps a manual Generate from doubling.
+            let pending = this.pending_chapters.replace(false);
+            if pending && !this.generating.get() && this.can_have_chapters() {
+                this.generate_chapters();
+            }
+        });
     }
 
     /// Chapters need an agent and a meeting long enough to divide.
@@ -2407,18 +2456,21 @@ impl Recorder {
 
     fn update_chapters_header(&self, has_chapters: bool) {
         let agent = self.default_agent();
+        let checking = self.agent_checking.get() && agent.is_none();
         self.chapters_group
-            .set_visible(agent.is_some() || has_chapters);
-        self.chapters_button.set_visible(agent.is_some());
+            .set_visible(agent.is_some() || has_chapters || checking);
+        self.chapters_button
+            .set_visible(agent.is_some() || checking);
         self.chapters_spinner.set_visible(self.generating.get());
         self.chapters_button
-            .set_sensitive(!self.generating.get() && self.can_have_chapters());
+            .set_sensitive(!self.generating.get() && !checking && self.can_have_chapters());
         self.chapters_button
             .set_label(if has_chapters { "Redo" } else { "Generate" });
         let description = match &agent {
             Some(agent) if self.generating.get() => {
                 format!("Writing chapters with {}…", agent.name)
             }
+            _ if checking => "Checking local LLM…".to_owned(),
             Some(agent) if has_chapters => format!("Made with {}", agent.name),
             Some(agent) if self.can_have_chapters() => {
                 format!("Let {} divide the meeting into chapters", agent.name)
@@ -2440,6 +2492,9 @@ impl Recorder {
         else {
             return;
         };
+        // A manual Generate consumes a deferred auto-generation: the probe
+        // callback must not start a second one.
+        self.pending_chapters.set(false);
         let lines = self.lines.borrow().clone();
         self.generating.set(true);
         self.update_chapters_header(!self.chapter_starts.borrow().is_empty());
@@ -3506,8 +3561,28 @@ pub fn safe_name(text: &str) -> String {
     let trimmed = cleaned.trim_matches(|c| c == ' ' || c == '.');
     if trimmed.is_empty() {
         "Meeting".to_owned()
+    } else if is_reserved_name(trimmed) {
+        // CON, PRN, NUL… with or without extension: renaming to one fails on
+        // Windows, so the stem gets a trailing underscore (CON → CON_).
+        let stem_end = trimmed.find('.').unwrap_or(trimmed.len());
+        let mut safe = trimmed.to_owned();
+        safe.insert(stem_end, '_');
+        safe
     } else {
         trimmed.to_owned()
+    }
+}
+
+/// A DOS device name (CON, PRN, AUX, NUL, COM1…COM9, LPT1…LPT9),
+/// case-insensitive, with or without an extension: Windows refuses to create
+/// or rename a file to one of these.
+fn is_reserved_name(name: &str) -> bool {
+    let stem = &name[..name.find('.').unwrap_or(name.len())];
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_bytes() {
+        [b'C', b'O', b'N'] | [b'P', b'R', b'N'] | [b'A', b'U', b'X'] | [b'N', b'U', b'L'] => true,
+        [b'C', b'O', b'M', d] | [b'L', b'P', b'T', d] if (b'1'..=b'9').contains(d) => true,
+        _ => false,
     }
 }
 
@@ -3639,4 +3714,25 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
             .build(),
     );
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_device_names_get_a_suffix_with_or_without_extension() {
+        for name in ["CON", "prn", "Aux", "NUL", "com1", "COM9", "lpt1", "LPT9"] {
+            let safe = safe_name(name);
+            assert!(!is_reserved_name(&safe), "{name} -> {safe}");
+            assert!(safe.ends_with('_'), "{name} -> {safe}");
+        }
+        assert_eq!(safe_name("con.txt"), "con_.txt");
+        assert_eq!(safe_name("NUL.ogg"), "NUL_.ogg");
+        // Not reserved: untouched.
+        assert_eq!(safe_name("console"), "console");
+        assert_eq!(safe_name("com10"), "com10");
+        assert_eq!(safe_name("Meeting: notes"), "Meeting- notes");
+        assert_eq!(safe_name("  "), "Meeting");
+    }
 }

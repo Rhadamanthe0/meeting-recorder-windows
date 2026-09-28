@@ -121,17 +121,22 @@ fn now_hms() -> String {
     )
 }
 
-/// Log fichier uniquement (`%APPDATA%\omarchy-meeting-recorder\audio-debug.log`) ;
+/// Log fichier uniquement (`audio-debug.log` sous [`crate::platform::data_dir`]) ;
 /// jamais de console. Toute erreur est ignorée pour ne pas changer le
-/// comportement audio.
+/// comportement audio. Capé à ~1 Mo : au-delà, le fichier est tronqué avec
+/// une ligne `log rotated` au lieu de grandir sans fin (stats toutes les 5 s).
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+
 fn debug_log(device: &str, msg: &str) {
     let line = format!("[{}] [{}] {}\n", now_hms(), tag(device), msg);
-    let Some(base) = dirs::data_dir() else {
-        return;
-    };
-    let path = base.join(crate::APP_NAME).join("audio-debug.log");
+    let path = crate::platform::data_dir()
+        .join(crate::APP_NAME)
+        .join("audio-debug.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_LOG_BYTES {
+        let _ = std::fs::write(&path, format!("[{}] log rotated\n", now_hms()));
     }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)

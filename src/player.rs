@@ -559,11 +559,9 @@ impl Player {
         };
         let generation = {
             let mut state = self.state.borrow_mut();
-            state.duration_us = playable
-                .iter()
-                .map(|p| probe_duration_us(p))
-                .max()
-                .unwrap_or(0);
+            // Probed below in `spawn_blocking`: `ffprobe`/`ffmpeg` can take
+            // seconds on a cold disk, and this runs on the UI thread.
+            state.duration_us = 0;
             state.files = playable.clone();
             state.paused_at_us = 0;
             state.generation += 1;
@@ -582,19 +580,28 @@ impl Player {
         };
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let peaks = gio::spawn_blocking(move || {
+            let probed = gio::spawn_blocking(move || {
+                let duration = playable
+                    .iter()
+                    .map(|p| probe_duration_us(p))
+                    .max()
+                    .unwrap_or(0);
                 let mic = peaks(&sources.0);
                 let computer = sources.1.as_deref().map(peaks);
-                (mic, computer)
+                (duration, mic, computer)
             })
             .await;
-            if let Ok((Some(mic), computer)) = peaks {
+            if let Ok((duration, mic, computer)) = probed {
                 let mut state = this.state.borrow_mut();
                 if state.generation == generation {
-                    let computer = computer.flatten().unwrap_or_else(|| vec![0.0; BINS]);
-                    state.peaks = Some((mic, computer));
+                    state.duration_us = duration;
+                    if let Some(mic) = mic {
+                        let computer = computer.flatten().unwrap_or_else(|| vec![0.0; BINS]);
+                        state.peaks = Some((mic, computer));
+                    }
                 }
             }
+            this.refresh();
             this.wave.queue_draw();
         });
         self.refresh();
@@ -625,6 +632,9 @@ impl Player {
     /// Stops playback and forgets the meeting.
     pub fn unload(&self) {
         let mut state = self.state.borrow_mut();
+        // Invalidates a `load` probe still in flight so its late duration or
+        // peaks cannot land on the now-empty player.
+        state.generation += 1;
         state.playback = None;
         #[cfg(target_os = "windows")]
         {
