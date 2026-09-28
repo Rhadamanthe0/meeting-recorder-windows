@@ -1081,7 +1081,7 @@ impl Recorder {
             let Some(r) = weak.upgrade() else { return };
             if let Some(dir) = r.result_dir.borrow().as_ref() {
                 let uri = gio::File::for_path(dir).uri();
-                let _ = gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>);
+                let _ = platform::open_uri(&uri);
             }
         });
 
@@ -1108,11 +1108,12 @@ impl Recorder {
                 r.refresh_actions();
             }
         });
-        self.add_actions_button.connect_clicked(|_| {
-            let _ = gio::AppInfo::launch_default_for_uri(
-                crate::actions::DOCS,
-                None::<&gio::AppLaunchContext>,
-            );
+        let weak = Rc::downgrade(self);
+        self.add_actions_button.connect_clicked(move |_| {
+            let Some(r) = weak.upgrade() else { return };
+            if platform::open_uri(crate::actions::DOCS).is_err() {
+                r.toast("Couldn't open the docs page");
+            }
         });
         if let Some(action) = self.window.lookup_action("run-action") {
             let weak = Rc::downgrade(self);
@@ -1255,10 +1256,7 @@ impl Recorder {
                         toast.set_button_label(Some("Open"));
                         toast.set_timeout(15);
                         toast.connect_button_clicked(move |_| {
-                            let _ = gio::AppInfo::launch_default_for_uri(
-                                &url,
-                                None::<&gio::AppLaunchContext>,
-                            );
+                            let _ = platform::open_uri(&url);
                         });
                     }
                     toast

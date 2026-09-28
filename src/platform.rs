@@ -117,6 +117,30 @@ pub fn runtime_dir() -> PathBuf {
     }
 }
 
+/// Ouvre une URI (page web, dossier `file://`, `obsidian://`, …) dans
+/// l'application par défaut.
+///
+/// Sur Windows `gio::AppInfo::launch_default_for_uri` échoue silencieusement,
+/// donc on passe par `cmd /C start "" <uri>` : le `""` est le titre vide
+/// exigé par `start` (sans lui l'URI serait prise pour un titre). Le
+/// `CREATE_NO_WINDOW` de [`silent_command`] évite tout flash de console.
+/// Sur Unix, simple délégation à gio (comportement amont inchangé).
+pub fn open_uri(uri: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        silent_command("cmd")
+            .args(["/C", "start", "", uri])
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>)
+            .map(|_| ())
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+}
+
 /// Construit un `Command` qui reste invisible sur Windows.
 ///
 /// `ffmpeg`/`ffprobe` (builds Gyan) et `cmd` sont des applications console :
