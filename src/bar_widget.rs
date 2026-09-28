@@ -6,7 +6,6 @@
 //! the widget there and puts it on the right of the bar.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 #[cfg(not(target_os = "windows"))]
@@ -62,7 +61,7 @@ fn enabled(mut run: impl FnMut(&str, &[&str]) -> Result<String, String>) -> Opti
 }
 
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let output = crate::platform::silent_command(program)
         .args(args)
         .output()
         .map_err(|e| format!("{program}: {e}"))?;

@@ -3,9 +3,9 @@
 use std::fs::OpenOptions;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::audio::{CHANNELS, RATE};
+use crate::platform::silent_command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -250,7 +250,7 @@ pub fn export_audio(mic_raw: &Path, system_raw: &Path, out: &Path, format: Forma
     };
 
     jobs.iter().all(|args| {
-        Command::new(ffmpeg())
+        silent_command(ffmpeg())
             .args(["-y", "-loglevel", "error"])
             .args(args)
             .status()
@@ -279,7 +279,7 @@ pub fn export_tracks(mic_raw: &Path, system_raw: &Path, meeting_dir: &Path) -> b
     [(mic_raw, mic), (system_raw, computer)]
         .iter()
         .all(|(raw, target)| {
-            Command::new(ffmpeg())
+            silent_command(ffmpeg())
                 .args([
                     "-y",
                     "-loglevel",
@@ -324,7 +324,7 @@ mod tests {
     }
 
     fn mean_db(path: &Path) -> f64 {
-        let out = Command::new(ffmpeg())
+        let out = silent_command(ffmpeg())
             .args(["-hide_banner", "-i"])
             .arg(path)
             .args(["-af", "volumedetect", "-f", "null", "-"])

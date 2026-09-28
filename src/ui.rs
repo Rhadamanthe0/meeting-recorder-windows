@@ -3326,7 +3326,7 @@ fn import_audio(
     std::fs::create_dir_all(staging).map_err(|e| e.to_string())?;
     let raw = staging.join("mic.raw");
     let silence = staging.join("system.raw");
-    let decoded = std::process::Command::new(export::ffmpeg())
+    let decoded = platform::silent_command(export::ffmpeg())
         .args(["-v", "error", "-y", "-nostdin", "-i"])
         .arg(source)
         .args(["-vn", "-f", "s16le", "-ar", "48000", "-ac", "2"])
@@ -3341,7 +3341,7 @@ fn import_audio(
     }
     let _ = std::fs::write(&silence, []);
     let listened = export_audio(&raw, &silence, out, Format::Mono);
-    let kept = std::process::Command::new(export::ffmpeg())
+    let kept = platform::silent_command(export::ffmpeg())
         .args([
             "-v", "error", "-y", "-nostdin", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i",
         ])

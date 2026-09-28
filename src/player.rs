@@ -35,6 +35,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use crate::export;
+use crate::platform::silent_command;
 
 const BINS: usize = 1000;
 const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
@@ -175,34 +176,20 @@ struct Playback {
 
 #[cfg(target_os = "windows")]
 impl Playback {
-    fn start(files: &[PathBuf], from_us: i64) -> Option<Playback> {
+    /// Opens the output device and plays already prepared `sources`.
+    /// Runs on the UI thread: only fast calls remain here.
+    fn assemble(sources: Vec<TrackSource>, from_us: i64) -> Option<Playback> {
         let (_stream, handle) = OutputStream::try_default().ok()?;
-        let mut sinks = Vec::with_capacity(files.len());
-        if have_ffmpeg() {
-            for file in files {
-                if let Some(source) = FfmpegPcm::spawn(file, from_us) {
-                    if let Ok(sink) = Sink::try_new(&handle) {
-                        sink.append(source);
-                        sinks.push(sink);
-                    }
-                }
+        let mut sinks = Vec::with_capacity(sources.len());
+        for source in sources {
+            let Ok(sink) = Sink::try_new(&handle) else {
+                continue;
+            };
+            match source {
+                TrackSource::Ffmpeg(source) => sink.append(source),
+                TrackSource::File(source) => sink.append(source),
             }
-        } else {
-            for file in files {
-                // One unreadable track must not silence the other.
-                let Ok(opened) = File::open(file) else {
-                    continue;
-                };
-                let Ok(decoder) = Decoder::new(BufReader::new(opened)) else {
-                    continue;
-                };
-                if let Ok(sink) = Sink::try_new(&handle) {
-                    sink.append(
-                        decoder.skip_duration(Duration::from_micros(from_us.max(0) as u64)),
-                    );
-                    sinks.push(sink);
-                }
-            }
+            sinks.push(sink);
         }
         if sinks.is_empty() {
             return None;
@@ -246,13 +233,56 @@ fn die_with_parent(command: &mut Command) -> &mut Command {
     command
 }
 
+/// One track ready to play, built off the UI thread.
+///
+/// `rodio::OutputStream` wraps a `cpal::Stream` which is explicitly `!Send`,
+/// so the stream itself cannot cross threads. Everything before it can: the
+/// `ffmpeg -version` probe, the `ffmpeg` decoders and the file decoders are
+/// all `Send`. They are prepared in the background (`prepare_sources`), the
+/// UI thread then only opens the device and appends them (`assemble`).
+#[cfg(target_os = "windows")]
+enum TrackSource {
+    Ffmpeg(FfmpegPcm),
+    File(rodio::source::SkipDuration<Decoder<BufReader<File>>>),
+}
+
+/// Builds every playable track's source: the blocking half of starting
+/// playback (the `ffmpeg -version` probe, spawning the `ffmpeg` decoders,
+/// opening and probing the files). Runs on a background thread; the result
+/// is `Send` so it can travel back to the UI thread for `assemble`.
+#[cfg(target_os = "windows")]
+fn prepare_sources(files: &[PathBuf], from_us: i64) -> Vec<TrackSource> {
+    let mut sources = Vec::with_capacity(files.len());
+    if have_ffmpeg() {
+        for file in files {
+            if let Some(source) = FfmpegPcm::spawn(file, from_us) {
+                sources.push(TrackSource::Ffmpeg(source));
+            }
+        }
+    } else {
+        for file in files {
+            // One unreadable track must not silence the other.
+            let Ok(opened) = File::open(file) else {
+                continue;
+            };
+            let Ok(decoder) = Decoder::new(BufReader::new(opened)) else {
+                continue;
+            };
+            sources.push(TrackSource::File(
+                decoder.skip_duration(Duration::from_micros(from_us.max(0) as u64)),
+            ));
+        }
+    }
+    sources
+}
+
 /// Whether `ffmpeg` resolves on PATH (`ffmpeg.exe` on Windows).
 /// When present it is the preferred decoder (covers Opus-in-Ogg and seeks
 /// with `-ss`); otherwise rodio's built-in (symphonia) decoder reads the
 /// files directly.
 #[cfg(target_os = "windows")]
 fn have_ffmpeg() -> bool {
-    Command::new(export::ffmpeg())
+    silent_command(export::ffmpeg())
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -275,7 +305,7 @@ struct FfmpegPcm {
 impl FfmpegPcm {
     fn spawn(file: &Path, from_us: i64) -> Option<Self> {
         let at = format!("{:.3}", from_us.max(0) as f64 / 1_000_000.0);
-        let mut command = Command::new(export::ffmpeg());
+        let mut command = silent_command(export::ffmpeg());
         command
             .args(["-v", "error", "-nostdin", "-ss", &at, "-i"])
             .arg(file)
@@ -344,7 +374,7 @@ fn probe_duration_us(path: &Path) -> i64 {
 
 #[cfg(target_os = "windows")]
 fn probe_with_ffprobe(path: &Path) -> Option<i64> {
-    Command::new(export::ffprobe())
+    silent_command(export::ffprobe())
         .args([
             "-v",
             "error",
@@ -363,7 +393,11 @@ fn probe_with_ffprobe(path: &Path) -> Option<i64> {
 
 #[cfg(target_os = "windows")]
 fn probe_with_ffmpeg(path: &Path) -> Option<i64> {
-    let out = Command::new(export::ffmpeg()).arg("-i").arg(path).output().ok()?;
+    let out = silent_command(export::ffmpeg())
+        .arg("-i")
+        .arg(path)
+        .output()
+        .ok()?;
     parse_ffmpeg_duration(&out.stderr)
 }
 
@@ -401,6 +435,13 @@ struct State {
     /// Where playback starts from next, while paused.
     paused_at_us: i64,
     playback: Option<Playback>,
+    /// A background `prepare_sources` in flight (Windows only). Bumped on
+    /// every play/pause/seek/unload so a late result is dropped instead of
+    /// playing from a stale position.
+    #[cfg(target_os = "windows")]
+    starting: bool,
+    #[cfg(target_os = "windows")]
+    start_seq: u64,
     /// Peaks per bin for the mic and the computer track, 0..1.
     peaks: Option<(Vec<f32>, Vec<f32>)>,
     /// Bumped on every load, so a slow waveform for an old meeting is dropped.
@@ -585,12 +626,21 @@ impl Player {
     pub fn unload(&self) {
         let mut state = self.state.borrow_mut();
         state.playback = None;
+        #[cfg(target_os = "windows")]
+        {
+            state.start_seq += 1;
+            state.starting = false;
+        }
         state.files.clear();
         state.duration_us = 0;
         state.paused_at_us = 0;
         state.peaks = None;
         state.chapters.clear();
         drop(state);
+        #[cfg(target_os = "windows")]
+        {
+            self.button.set_sensitive(true);
+        }
         self.set_playing_icon(false);
         self.wave.queue_draw();
     }
@@ -620,21 +670,77 @@ impl Player {
     }
 
     pub fn play(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            // Tout le travail bloquant (sonde `ffmpeg -version`, spawn des
+            // décodeurs `ffmpeg`, ouverture et sondage des fichiers) part en
+            // fond : le clic rend la main immédiatement, même si un spawn
+            // rame. Seul l'assemblage (`OutputStream` + sinks, `!Send`,
+            // donc non transférable) revient sur le thread UI.
+            let (files, from_us, seq) = {
+                let mut state = self.state.borrow_mut();
+                if state.files.is_empty() {
+                    return;
+                }
+                if state.paused_at_us >= state.duration_us {
+                    state.paused_at_us = 0;
+                }
+                state.playback = None;
+                state.start_seq += 1;
+                state.starting = true;
+                (state.files.clone(), state.paused_at_us, state.start_seq)
+            };
+            self.button.set_sensitive(false);
+            self.button.set_tooltip_text(Some("Loading…"));
+            let this = self.clone();
+            glib::spawn_future_local(async move {
+                let sources = gio::spawn_blocking(move || prepare_sources(&files, from_us))
+                    .await
+                    .unwrap_or_else(|_| Vec::new());
+                this.finish_start(seq, from_us, sources);
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let started = {
+                let mut state = self.state.borrow_mut();
+                if state.files.is_empty() {
+                    return;
+                }
+                if state.paused_at_us >= state.duration_us {
+                    state.paused_at_us = 0;
+                }
+                state.playback = None;
+                state.playback = Playback::start(&state.files, state.paused_at_us);
+                state.playback.is_some()
+            };
+            self.set_playing_icon(started);
+            if started {
+                self.start_ticking();
+            }
+        }
+    }
+
+    /// Back on the UI thread with the prepared sources: open the device and
+    /// play, unless a pause/seek/unload superseded this start meanwhile (its
+    /// sources are then dropped, killing just-spawned `ffmpeg` at once).
+    #[cfg(target_os = "windows")]
+    fn finish_start(&self, seq: u64, from_us: i64, sources: Vec<TrackSource>) {
         let started = {
             let mut state = self.state.borrow_mut();
-            if state.files.is_empty() {
+            if state.start_seq != seq {
                 return;
             }
-            if state.paused_at_us >= state.duration_us {
-                state.paused_at_us = 0;
-            }
-            state.playback = None;
-            state.playback = Playback::start(&state.files, state.paused_at_us);
+            state.starting = false;
+            state.playback = Playback::assemble(sources, from_us);
             state.playback.is_some()
         };
+        self.button.set_sensitive(true);
         self.set_playing_icon(started);
         if started {
             self.start_ticking();
+        } else {
+            self.refresh();
         }
     }
 
@@ -644,6 +750,16 @@ impl Player {
             let mut state = self.state.borrow_mut();
             state.playback = None;
             state.paused_at_us = position;
+            #[cfg(target_os = "windows")]
+            {
+                // Drops any late background start instead of playing it.
+                state.start_seq += 1;
+                state.starting = false;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.button.set_sensitive(true);
         }
         self.set_playing_icon(false);
         self.refresh();
@@ -657,6 +773,9 @@ impl Player {
 
     fn seek(&self, us: i64) {
         let us = us.clamp(0, self.duration_us().max(0));
+        #[cfg(target_os = "windows")]
+        let playing = self.is_playing() || self.state.borrow().starting;
+        #[cfg(not(target_os = "windows"))]
         let playing = self.is_playing();
         self.state.borrow_mut().paused_at_us = us;
         if playing {
@@ -787,7 +906,7 @@ impl Player {
 /// Decodes `path` at a low rate and keeps the loudest sample per bin, scaled
 /// to 0..1 with a gentle curve so quiet speech still shows.
 fn peaks(path: &Path) -> Option<Vec<f32>> {
-    let output = Command::new(export::ffmpeg())
+    let output = silent_command(export::ffmpeg())
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-ac", "1", "-ar", "4000", "-f", "s16le", "-"])

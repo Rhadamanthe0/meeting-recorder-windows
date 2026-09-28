@@ -16,9 +16,10 @@
 //! edited the transcript or the meeting file, the done page reads them again.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::meeting::Manifest;
+use crate::platform::silent_command;
 
 /// How actions work, for people and their agents; the done page links here
 /// when there are none yet.
@@ -120,10 +121,10 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
         .iter()
         .map(|f| dir.join(f))
         .find(|p| p.exists());
-    let mut shell = Command::new("sh");
+    let mut shell = silent_command("sh");
     #[cfg(target_os = "windows")]
     {
-        shell = Command::new("cmd");
+        shell = silent_command("cmd");
         shell.arg("/C").arg(&action.command);
     }
     #[cfg(not(target_os = "windows"))]

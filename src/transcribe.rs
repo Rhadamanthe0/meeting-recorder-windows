@@ -10,7 +10,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -103,7 +103,7 @@ pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let mut child = Command::new(crate::export::ffmpeg())
+    let mut child = crate::platform::silent_command(crate::export::ffmpeg())
         .args(["-nostdin", "-loglevel", "error", "-i"])
         .arg(path)
         .args([

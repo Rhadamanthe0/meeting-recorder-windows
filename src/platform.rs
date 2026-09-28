@@ -11,6 +11,7 @@
 //! (AppData Roaming/Local, Documents) avec repli glib.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::APP_NAME;
 
@@ -113,5 +114,36 @@ pub fn runtime_dir() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     {
         gtk::glib::user_runtime_dir()
+    }
+}
+
+/// Construit un `Command` qui reste invisible sur Windows.
+///
+/// `ffmpeg`/`ffprobe` (builds Gyan) et `cmd` sont des applications console :
+/// sans `CREATE_NO_WINDOW` chaque spawn ouvre un flash de console. Sur Unix,
+/// simple passthrough de `Command::new` (args/stdio inchangés aux call sites).
+pub fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        // CREATE_NO_WINDOW (0x08000000) : pas de console, pas de flash.
+        // Constante en littéral pour ne pas ajouter de dépendance.
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn silent_command_keeps_program_and_args() {
+        let mut command = silent_command("ffmpeg");
+        command.arg("-version");
+        let debug = format!("{command:?}");
+        assert!(debug.contains("ffmpeg"), "{debug}");
+        assert!(debug.contains("-version"), "{debug}");
     }
 }
