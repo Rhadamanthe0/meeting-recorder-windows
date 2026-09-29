@@ -130,8 +130,7 @@ jobs:
       # d'exception silencieuse, le migrer vers `silent_command` (c'est le but).
       - name: Guard spawns console (silent_command obligatoire)
         run: |
-          $hits = rg -n "Command::new" src
-          if ($LASTEXITCODE -notin @(0, 1)) { throw "rg a échoué (exit $LASTEXITCODE)" }
+          $hits = @(Get-ChildItem -LiteralPath src -Recurse -Filter *.rs | Select-String -Pattern 'Command::new' | ForEach-Object { "$(([System.IO.Path]::GetRelativePath((Get-Location).Path, $_.Path) -replace '\\','/')):$($_.LineNumber):$($_.Line.Trim())" })
           $bad = @()
           foreach ($h in $hits) {
             if ($h -match '^src/platform\.rs:') { continue }
@@ -158,8 +157,7 @@ jobs:
       # légitime = la branche Unix de `open_uri` dans src/platform.rs.
       - name: Guard open_uri (pas de launch_default_for_uri direct)
         run: |
-          $hits = rg -n "launch_default_for_uri" src
-          if ($LASTEXITCODE -notin @(0, 1)) { throw "rg a échoué (exit $LASTEXITCODE)" }
+          $hits = @(Get-ChildItem -LiteralPath src -Recurse -Filter *.rs | Select-String -Pattern 'launch_default_for_uri' | ForEach-Object { "$(([System.IO.Path]::GetRelativePath((Get-Location).Path, $_.Path) -replace '\\','/')):$($_.LineNumber):$($_.Line.Trim())" })
           $bad = @($hits | Where-Object { $_ -notmatch '^src/platform\.rs:' })
           if ($bad.Count -gt 0) {
             $bad | ForEach-Object { Write-Output "[ci] appel direct : $_" }
@@ -199,15 +197,15 @@ jobs:
 
       # Guard subsystem GUI (bloquant) : l'exe doit être `Windows GUI` sinon
       # Windows ouvre une console au double-clic. Double preuve : header PE
-      # (`objdump -f` exige `Subsystem ... Windows GUI`, lecture seule) +
+      # (`objdump -p` exige `Subsystem ... Windows GUI`, lecture seule) +
       # l'attribut source `windows_subsystem = "windows"` dans src/main.rs.
       - name: Guard subsystem GUI (pas de console au double-clic)
         run: |
           if (-not (Select-String -Path src/main.rs -Pattern 'windows_subsystem = "windows"' -Quiet)) { throw 'attribut windows_subsystem manquant dans src/main.rs (console au double-clic)' }
           $objdump = Join-Path $env:UCRT_BIN "objdump.exe"
           if (-not (Test-Path -LiteralPath $objdump)) { throw "objdump.exe introuvable ($objdump) : impossible de vérifier le subsystem PE" }
-          $hdr = & $objdump -f target/release/meeting-recorder-windows.exe
-          if ($LASTEXITCODE -ne 0) { throw "objdump -f exit $LASTEXITCODE" }
+          $hdr = & $objdump -p target/release/meeting-recorder-windows.exe
+          if ($LASTEXITCODE -ne 0) { throw "objdump -p exit $LASTEXITCODE" }
           $hdr | ForEach-Object { Write-Output "[ci] objdump: $_" }
           if (-not ($hdr | Where-Object { $_ -match 'Subsystem\s+.*Windows GUI' })) { throw "subsystem PE inattendu (pas Windows GUI) : l'exe ouvrirait une console au double-clic" }
           Write-Output "[ci] guard subsystem GUI OK"

@@ -32,10 +32,9 @@
 //! the read-only sandbox under it as a second layer. Crush and Antigravity have
 //! neither and are refused rather than run with tools.
 
-use std::io::Read;
-use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
+use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 #[cfg(target_os = "linux")]
@@ -44,6 +43,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -843,7 +843,7 @@ fn post_chat(base: &str, model: &str, content: &str) -> Result<String, String> {
             .header("Content-Type", "application/json")
             .send(body)
     }
-        .map_err(|e| format!("{base}: {e}"))?;
+    .map_err(|e| format!("{base}: {e}"))?;
     let mut body = String::new();
     response
         .into_body()
@@ -857,9 +857,7 @@ fn post_chat(base: &str, model: &str, content: &str) -> Result<String, String> {
         .as_str()
         .map(str::to_owned)
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
-            first_line(&body).unwrap_or_else(|| format!("{base}: empty answer"))
-        })
+        .ok_or_else(|| first_line(&body).unwrap_or_else(|| format!("{base}: empty answer")))
 }
 
 /// The local LLM, when one of the servers answers.

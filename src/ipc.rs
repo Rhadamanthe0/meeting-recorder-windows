@@ -15,9 +15,9 @@
 //! (`\\.\pipe\meeting-recorder-windows`, via the `interprocess` crate) on
 //! Windows. The NDJSON protocol and the commands are identical on both.
 
-use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "linux")]
 use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(target_os = "linux")]
