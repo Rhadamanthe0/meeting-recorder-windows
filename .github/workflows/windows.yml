@@ -197,15 +197,15 @@ jobs:
 
       # Guard subsystem GUI (bloquant) : l'exe doit être `Windows GUI` sinon
       # Windows ouvre une console au double-clic. Double preuve : header PE
-      # (`objdump -f` exige `Subsystem ... Windows GUI`, lecture seule) +
+      # (`objdump -p` exige `Subsystem ... Windows GUI`, lecture seule) +
       # l'attribut source `windows_subsystem = "windows"` dans src/main.rs.
       - name: Guard subsystem GUI (pas de console au double-clic)
         run: |
           if (-not (Select-String -Path src/main.rs -Pattern 'windows_subsystem = "windows"' -Quiet)) { throw 'attribut windows_subsystem manquant dans src/main.rs (console au double-clic)' }
           $objdump = Join-Path $env:UCRT_BIN "objdump.exe"
           if (-not (Test-Path -LiteralPath $objdump)) { throw "objdump.exe introuvable ($objdump) : impossible de vérifier le subsystem PE" }
-          $hdr = & $objdump -f target/release/meeting-recorder-windows.exe
-          if ($LASTEXITCODE -ne 0) { throw "objdump -f exit $LASTEXITCODE" }
+          $hdr = & $objdump -p target/release/meeting-recorder-windows.exe
+          if ($LASTEXITCODE -ne 0) { throw "objdump -p exit $LASTEXITCODE" }
           $hdr | ForEach-Object { Write-Output "[ci] objdump: $_" }
           if (-not ($hdr | Where-Object { $_ -match 'Subsystem\s+.*Windows GUI' })) { throw "subsystem PE inattendu (pas Windows GUI) : l'exe ouvrirait une console au double-clic" }
           Write-Output "[ci] guard subsystem GUI OK"
