@@ -130,8 +130,7 @@ jobs:
       # d'exception silencieuse, le migrer vers `silent_command` (c'est le but).
       - name: Guard spawns console (silent_command obligatoire)
         run: |
-          $hits = rg -n "Command::new" src
-          if ($LASTEXITCODE -notin @(0, 1)) { throw "rg a échoué (exit $LASTEXITCODE)" }
+          $hits = @(Get-ChildItem -LiteralPath src -Recurse -Filter *.rs | Select-String -Pattern 'Command::new' | ForEach-Object { "$(([System.IO.Path]::GetRelativePath((Get-Location).Path, $_.Path) -replace '\\','/')):$($_.LineNumber):$($_.Line.Trim())" })
           $bad = @()
           foreach ($h in $hits) {
             if ($h -match '^src/platform\.rs:') { continue }
@@ -158,8 +157,7 @@ jobs:
       # légitime = la branche Unix de `open_uri` dans src/platform.rs.
       - name: Guard open_uri (pas de launch_default_for_uri direct)
         run: |
-          $hits = rg -n "launch_default_for_uri" src
-          if ($LASTEXITCODE -notin @(0, 1)) { throw "rg a échoué (exit $LASTEXITCODE)" }
+          $hits = @(Get-ChildItem -LiteralPath src -Recurse -Filter *.rs | Select-String -Pattern 'launch_default_for_uri' | ForEach-Object { "$(([System.IO.Path]::GetRelativePath((Get-Location).Path, $_.Path) -replace '\\','/')):$($_.LineNumber):$($_.Line.Trim())" })
           $bad = @($hits | Where-Object { $_ -notmatch '^src/platform\.rs:' })
           if ($bad.Count -gt 0) {
             $bad | ForEach-Object { Write-Output "[ci] appel direct : $_" }
