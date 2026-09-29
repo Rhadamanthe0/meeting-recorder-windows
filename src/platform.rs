@@ -124,14 +124,28 @@ pub fn runtime_dir() -> PathBuf {
 /// donc on passe par `cmd /C start "" <uri>` : le `""` est le titre vide
 /// exigé par `start` (sans lui l'URI serait prise pour un titre). Le
 /// `CREATE_NO_WINDOW` de [`silent_command`] évite tout flash de console.
+/// L'URI est quotée (voir [`quote_for_cmd`]) : sans cela `cmd` couperait
+/// l'URI sur `&`/`|`/`^` (`obsidian://open?vault=V&file=F` lancerait `file=F`
+/// comme commande) ou étendrait `%var%`. Le `start` détache le navigateur
+/// puis termine aussitôt, donc attendre sa fin ne bloque pas l'UI de façon
+/// perceptible ; son code de sortie non nul devient `Err` pour que l'appelant
+/// puisse toaster l'échec.
 /// Sur Unix, simple délégation à gio (comportement amont inchangé).
 pub fn open_uri(uri: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        silent_command("cmd")
-            .args(["/C", "start", "", uri])
-            .spawn()
-            .map(|_| ())
+        use std::os::windows::process::CommandExt;
+        let status = silent_command("cmd")
+            .args(["/C", "start", ""])
+            .raw_arg(quote_for_cmd(uri))
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "`cmd /C start` exited with {status}"
+            )))
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -139,6 +153,16 @@ pub fn open_uri(uri: &str) -> std::io::Result<()> {
             .map(|_| ())
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
+}
+
+/// Quote une URI pour `cmd /C start "" <uri>`.
+///
+/// `cmd` réinterprète la ligne même à l'intérieur des guillemets pour `%var%`
+/// (expansion d'environnement), donc `%` est doublé ; `&`/`|`/`^`/`<`/`>`
+/// sont littéraux entre guillemets. `"` ne peut pas survivre intact dans une
+/// URI entre guillemets `cmd`, il est retiré pour ne pas en sortir.
+fn quote_for_cmd(uri: &str) -> String {
+    format!("\"{}\"", uri.replace('"', "").replace('%', "%%"))
 }
 
 /// Construit un `Command` qui reste invisible sur Windows.
@@ -169,5 +193,21 @@ mod tests {
         let debug = format!("{command:?}");
         assert!(debug.contains("ffmpeg"), "{debug}");
         assert!(debug.contains("-version"), "{debug}");
+    }
+
+    #[test]
+    fn cmd_quoting_keeps_metachars_and_percent_intact() {
+        // `&` doit rester dans l'URI au lieu de séparer deux commandes…
+        assert_eq!(
+            quote_for_cmd("obsidian://open?vault=V&file=F"),
+            "\"obsidian://open?vault=V&file=F\""
+        );
+        // …`%var%` ne doit pas être étendu par `cmd`…
+        assert_eq!(
+            quote_for_cmd("https://x/%USER%/y"),
+            "\"https://x/%%USER%%/y\""
+        );
+        // …et `"` ne doit pas permettre de sortir des guillemets.
+        assert_eq!(quote_for_cmd("https://x/a\"|b"), "\"https://x/a|b\"");
     }
 }

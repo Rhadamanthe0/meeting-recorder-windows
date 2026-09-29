@@ -34,6 +34,9 @@ struct Inner {
     file: Option<BufWriter<File>>,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
+    /// Last init failure step (`None` while capturing fine): polled by the UI
+    /// to warn instead of recording silence. Set on the capture thread.
+    error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -50,6 +53,7 @@ impl Source {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
             paused: false,
+            error: None,
         }));
         let shared = inner.clone();
         thread::spawn(move || {
@@ -95,6 +99,13 @@ impl Source {
             .take(n)
             .copied()
             .fold(0.0, f32::max)
+    }
+
+    /// The last capture init failure step, if the device refuses to start
+    /// (exotic mix format, no default device, …). `None` while capturing
+    /// fine. Polled from the UI thread to warn instead of recording silence.
+    pub fn init_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.clone()
     }
 }
 
@@ -158,10 +169,13 @@ fn kind_name(kind: SampleKind) -> &'static str {
 }
 
 /// Échec d'init : une ligne avec l'étape + une ligne « reopen », puis retour
-/// (la boucle `spawn` dort 1 s et rouvre, comportement inchangé).
-fn init_failed(device: &str, step: &str) {
+/// (la boucle `spawn` dort 1 s et rouvre, comportement inchangé). L'étape est
+/// aussi mémorisée dans `Inner::error` pour que l'UI prévienne au lieu
+/// d'enregistrer du silence ; effacée au prochain démarrage réussi.
+fn init_failed(device: &str, step: &str, shared: &Mutex<Inner>) {
     debug_log(device, &format!("init failed step={step}"));
     debug_log(device, "reopen in 1s");
+    shared.lock().unwrap().error = Some(step.to_owned());
 }
 
 /// Layout natif d'un échantillon du format mix du device.
@@ -351,14 +365,14 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     let enumerator = match DeviceEnumerator::new() {
         Ok(enumerator) => enumerator,
         Err(_) => {
-            init_failed(device, "enumerator");
+            init_failed(device, "enumerator", shared);
             return;
         }
     };
     let dev = match enumerator.get_default_device(&default_dir) {
         Ok(dev) => dev,
         Err(_) => {
-            init_failed(device, "default-device");
+            init_failed(device, "default-device", shared);
             return;
         }
     };
@@ -374,7 +388,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     let mut client = match dev.get_iaudioclient() {
         Ok(client) => client,
         Err(_) => {
-            init_failed(device, "iaudioclient");
+            init_failed(device, "iaudioclient", shared);
             return;
         }
     };
@@ -382,7 +396,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     let mix = match client.get_mixformat() {
         Ok(mix) => mix,
         Err(_) => {
-            init_failed(device, "mixformat");
+            init_failed(device, "mixformat", shared);
             return;
         }
     };
@@ -399,7 +413,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         ),
     );
     if !desc.valid || desc.blockalign == 0 || desc.channels == 0 {
-        init_failed(device, "desc-invalid");
+        init_failed(device, "desc-invalid", shared);
         return;
     }
     let period = match client.get_device_period() {
@@ -420,21 +434,23 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         )
         .is_err()
     {
-        init_failed(device, "initialize-client");
+        init_failed(device, "initialize-client", shared);
         return;
     }
     let capture = match client.get_audiocaptureclient() {
         Ok(capture) => capture,
         Err(_) => {
-            init_failed(device, "captureclient");
+            init_failed(device, "captureclient", shared);
             return;
         }
     };
     let event = client.set_get_eventhandle().ok();
     if client.start_stream().is_err() {
-        init_failed(device, "start-stream");
+        init_failed(device, "start-stream", shared);
         return;
     }
+    // Le flux tourne : un échec précédent est résorbé, l'UI n'a plus à prévenir.
+    shared.lock().unwrap().error = None;
 
     let mut converter = Converter { desc, pos: 0.0 };
     let mut pending: Vec<u8> = Vec::with_capacity(CHUNK_BYTES * 2);

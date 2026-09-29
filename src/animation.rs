@@ -116,7 +116,9 @@ impl TranscribeAnimation {
             .vexpand(true)
             .build();
         let model: Rc<RefCell<Model>> = Rc::default();
-        model.borrow_mut().grain = (0..3).map(|i| grain(i as u64)).collect();
+        // Sans grain plutôt qu'un panic au boot : `crt` saute la passe
+        // quand il n'y a aucune tuile.
+        model.borrow_mut().grain = (0..3).filter_map(|i| grain(i as u64)).collect();
 
         let drawing = model.clone();
         area.set_draw_func(move |_, cr, width, height| {
@@ -191,12 +193,16 @@ impl TranscribeAnimation {
 use gtk::glib;
 
 /// A tile of film grain; three of them are cycled like the site's `steps(3)`.
-fn grain(seed: u64) -> ImageSurface {
+/// `None` when cairo refuses the surface (boot exotique) : l'appelant
+/// dégrade sans grain au lieu de paniquer toute la GUI.
+fn grain(seed: u64) -> Option<ImageSurface> {
     let (w, h) = (192, 120);
-    let mut surface = ImageSurface::create(Format::ARgb32, w, h).expect("grain surface");
+    let mut surface = ImageSurface::create(Format::ARgb32, w, h).ok()?;
     let stride = surface.stride() as usize;
     {
-        let mut data = surface.data().expect("grain data");
+        let Ok(mut data) = surface.data() else {
+            return None;
+        };
         for y in 0..h as usize {
             for x in 0..w as usize {
                 let n = hash(seed * 1_000_003 + (y * w as usize + x) as u64);
@@ -209,7 +215,7 @@ fn grain(seed: u64) -> ImageSurface {
             }
         }
     }
-    surface
+    Some(surface)
 }
 
 fn set(cr: &Context, c: Rgb, alpha: f64) {
@@ -637,4 +643,29 @@ fn crt(cr: &Context, w: f64, h: f64, t: f64, m: &Model) {
     let flicker = 0.02 * hash((t * 30.0) as u64);
     set(cr, dark(), flicker);
     let _ = cr.paint();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grain_builds_a_tile() {
+        let tile = grain(0).expect("grain builds on a working cairo");
+        assert_eq!((tile.width(), tile.height()), (192, 120));
+    }
+
+    #[test]
+    fn draw_without_grain_does_not_panic() {
+        // Le chemin dégradé du boot (aucune tuile) doit dessiner quand même.
+        let surface = ImageSurface::create(Format::ARgb32, 320, 220).expect("test surface");
+        let cr = Context::new(&surface).expect("test context");
+        let mut m = Model::default();
+        assert!(m.grain.is_empty());
+        m.now = 1.25;
+        m.shown_progress = 0.4;
+        m.stage = "Test".to_owned();
+        m.lines.push("hello".to_owned());
+        draw(&cr, 320.0, 220.0, &mut m);
+    }
 }

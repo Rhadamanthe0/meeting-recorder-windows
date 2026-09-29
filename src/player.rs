@@ -459,6 +459,9 @@ pub struct Player {
     state: Rc<RefCell<State>>,
     /// Called with the position in ms while playing, for the transcript highlight.
     on_position: PositionCallback,
+    /// Called once when playback fails to start (no device, no decodable
+    /// track), so the UI can say so instead of silently flipping back to Play.
+    on_error: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     ticking: Rc<Cell<bool>>,
 }
 
@@ -496,6 +499,7 @@ impl Player {
             time,
             state: Rc::default(),
             on_position: Rc::default(),
+            on_error: Rc::default(),
             ticking: Rc::default(),
         };
 
@@ -543,6 +547,17 @@ impl Player {
 
     pub fn connect_position(&self, callback: impl Fn(i64) + 'static) {
         *self.on_position.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Registers the callback run when playback fails to start, on the UI thread.
+    pub fn connect_error(&self, callback: impl Fn() + 'static) {
+        *self.on_error.borrow_mut() = Some(Box::new(callback));
+    }
+
+    fn playback_failed(&self) {
+        if let Some(callback) = self.on_error.borrow().as_ref() {
+            callback();
+        }
     }
 
     /// Loads the meeting in `dir`: its audio for playback, its tracks for the waveform.
@@ -727,20 +742,29 @@ impl Player {
             self.set_playing_icon(started);
             if started {
                 self.start_ticking();
+            } else {
+                self.playback_failed();
             }
         }
     }
 
     /// Back on the UI thread with the prepared sources: open the device and
     /// play, unless a pause/seek/unload superseded this start meanwhile (its
-    /// sources are then dropped, killing just-spawned `ffmpeg` at once).
+    /// sources are then dropped off the UI thread, killing just-spawned
+    /// `ffmpeg` at once: `FfmpegPcm::drop` does `kill` + a blocking `wait`).
     #[cfg(target_os = "windows")]
     fn finish_start(&self, seq: u64, from_us: i64, sources: Vec<TrackSource>) {
-        let started = {
-            let mut state = self.state.borrow_mut();
+        {
+            let state = self.state.borrow();
             if state.start_seq != seq {
+                drop(state);
+                // Stale start: reap off the UI thread, never block GTK.
+                gio::spawn_blocking(move || drop(sources));
                 return;
             }
+        }
+        let started = {
+            let mut state = self.state.borrow_mut();
             state.starting = false;
             state.playback = Playback::assemble(sources, from_us);
             state.playback.is_some()
@@ -751,6 +775,7 @@ impl Player {
             self.start_ticking();
         } else {
             self.refresh();
+            self.playback_failed();
         }
     }
 

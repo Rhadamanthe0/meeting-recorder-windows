@@ -28,7 +28,8 @@ jobs:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
           # Éteint le warning rustfmt non fatal vu en log CI.
-          components: rustfmt
+          # clippy : requis par le step informatif "Clippy" ci-dessous.
+          components: rustfmt, clippy
 
       - name: Affiche la toolchain (hôte GNU attendu)
         run: rustc -vV
@@ -117,12 +118,72 @@ jobs:
       - name: Generate lockfile
         run: cargo generate-lockfile
 
+      # Guard A (bloquant) : tout spawn Windows doit passer par
+      # `platform::silent_command` (CREATE_NO_WINDOW), sinon flash de console.
+      # Seule source légitime de `Command::new` = src/platform.rs.
+      # Faux positifs connus et tolérés : spawns Unix-only sous gate cfg
+      # (`cfg(target_os = "linux")` ou `cfg(not(target_os = "windows"))` dans
+      # les 40 lignes au-dessus ou en tête de fichier : agent.rs
+      # omarchy-default-agent/opencode/setsid/kill, parec, hyprctl,
+      # ffmpeg|pacat/ffprobe sous `#[cfg(target_os = "linux")]`).
+      # Si un hit Windows-légitime apparaît hors platform.rs : NE PAS ajouter
+      # d'exception silencieuse, le migrer vers `silent_command` (c'est le but).
+      - name: Guard spawns console (silent_command obligatoire)
+        run: |
+          $hits = rg -n "Command::new" src
+          if ($LASTEXITCODE -notin @(0, 1)) { throw "rg a échoué (exit $LASTEXITCODE)" }
+          $bad = @()
+          foreach ($h in $hits) {
+            if ($h -match '^src/platform\.rs:') { continue }
+            if ($h -match '^(.*?):(\d+):') {
+              $file = $Matches[1]
+              $line = [int]$Matches[2]
+              $all = Get-Content -LiteralPath $file
+              $from = [Math]::Max(0, $line - 41)
+              $ctx = @($all | Select-Object -First 3) + @($all | Select-Object -Skip $from -First 40)
+              $gated = @($ctx | Where-Object { $_ -match 'cfg\s*\(\s*(not\s*\(\s*target_os\s*=\s*"windows"\s*\)|target_os\s*=\s*"linux")' }).Count -gt 0
+              if ($gated) { Write-Output "[ci] hit Unix-only toléré : $h" }
+              else { $bad += $h }
+            } else { $bad += $h }
+          }
+          if ($bad.Count -gt 0) {
+            $bad | ForEach-Object { Write-Output "[ci] spawn brut : $_" }
+            throw "Command::new hors src/platform.rs sans gate cfg Unix ($($bad.Count) hit(s)) : utiliser platform::silent_command (CREATE_NO_WINDOW) au lieu de spawner brut"
+          }
+          Write-Output "[ci] guard Command::new OK"
+
+      # Guard C (bloquant) : `gio::launch_default_for_uri` échoue
+      # silencieusement sur Windows ; tout le code doit passer par
+      # `platform::open_uri` (cmd /C start silencieux). Seule occurrence
+      # légitime = la branche Unix de `open_uri` dans src/platform.rs.
+      - name: Guard open_uri (pas de launch_default_for_uri direct)
+        run: |
+          $hits = rg -n "launch_default_for_uri" src
+          if ($LASTEXITCODE -notin @(0, 1)) { throw "rg a échoué (exit $LASTEXITCODE)" }
+          $bad = @($hits | Where-Object { $_ -notmatch '^src/platform\.rs:' })
+          if ($bad.Count -gt 0) {
+            $bad | ForEach-Object { Write-Output "[ci] appel direct : $_" }
+            throw "launch_default_for_uri hors src/platform.rs ($($bad.Count) hit(s)) : utiliser platform::open_uri"
+          }
+          Write-Output "[ci] guard launch_default_for_uri OK"
+
+      # Rustfmt bloquant (~10 s) : attrape le code non formaté avant review.
+      - name: Format rustfmt (bloquant)
+        run: cargo fmt --all -- --check
+
       # Contrôle sur le lock régénéré ci-dessus.
       - name: Check
         run: cargo check
 
       - name: Test
         run: cargo test
+
+      # Clippy informatif (NON BLOQUANT, continue-on-error) : relève les
+      # warnings sans gater tant que le socle n'est pas clean ; gating futur
+      # envisagé une fois le bruit résorbé.
+      - name: Clippy (informatif, non bloquant)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
 
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
       - name: Diagnostic libs statiques
@@ -135,6 +196,21 @@ jobs:
 
       - name: Build release (Vulkan OFF by default)
         run: cargo build --release
+
+      # Guard subsystem GUI (bloquant) : l'exe doit être `Windows GUI` sinon
+      # Windows ouvre une console au double-clic. Double preuve : header PE
+      # (`objdump -f` exige `Subsystem ... Windows GUI`, lecture seule) +
+      # l'attribut source `windows_subsystem = "windows"` dans src/main.rs.
+      - name: Guard subsystem GUI (pas de console au double-clic)
+        run: |
+          if (-not (Select-String -Path src/main.rs -Pattern 'windows_subsystem = "windows"' -Quiet)) { throw 'attribut windows_subsystem manquant dans src/main.rs (console au double-clic)' }
+          $objdump = Join-Path $env:UCRT_BIN "objdump.exe"
+          if (-not (Test-Path -LiteralPath $objdump)) { throw "objdump.exe introuvable ($objdump) : impossible de vérifier le subsystem PE" }
+          $hdr = & $objdump -f target/release/meeting-recorder-windows.exe
+          if ($LASTEXITCODE -ne 0) { throw "objdump -f exit $LASTEXITCODE" }
+          $hdr | ForEach-Object { Write-Output "[ci] objdump: $_" }
+          if (-not ($hdr | Where-Object { $_ -match 'Subsystem\s+.*Windows GUI' })) { throw "subsystem PE inattendu (pas Windows GUI) : l'exe ouvrirait une console au double-clic" }
+          Write-Output "[ci] guard subsystem GUI OK"
 
       # Remplace les symlinks copy-dylibs par de vrais fichiers DLL (symlink-safe).
       - name: Copie DLL ORT vers target/release
@@ -207,7 +283,9 @@ jobs:
           $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
           if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
-          # Diagnostic imports manquants (lecture seule, ne fait jamais échouer).
+          # Diagnostic imports manquants (lecture seule, BLOQUANT via throw
+          # après le bloc try : une closure incomplète ne doit plus passer).
+          $diagMissing = @()
           try {
             $diagObjdump = Join-Path $env:UCRT_BIN "objdump.exe"
             if (-not (Test-Path -LiteralPath $diagObjdump)) {
@@ -255,7 +333,7 @@ jobs:
                       continue
                     }
                     if (Test-Path -LiteralPath (Join-Path $diagSys32 $diagDep)) { continue }
-                    Write-Output "[diag] import manquant : $diagDep (importé par $(Split-Path $diagFile -Leaf))"
+                    $diagMissing += "$diagDep (importé par $(Split-Path $diagFile -Leaf))"
                   }
                 }
               }
@@ -263,14 +341,48 @@ jobs:
           } catch {
             Write-Warning "[diag] diagnostic imports impossible : $($_.Exception.Message)"
           }
+          if ($diagMissing.Count -gt 0) {
+            $diagMissing | ForEach-Object { Write-Output "[diag] import manquant : $_" }
+            throw "imports DLL manquants ($($diagMissing.Count)) : closure embarquée incomplète"
+          }
           # Exe GUI (windows_subsystem) : PowerShell n'attend pas et ne capte
           # rien avec `& $exe --help`, d'où Start-Process + pipe fichier.
           $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
           if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
           if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt (console GUI non rattachée ?)" }
           Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
+          # ffmpeg embarqué (requis par export_audio) : doit démarrer et
+          # afficher sa version, sinon le MSI est incomplet.
+          $ffExe = Join-Path (Split-Path $exe -Parent) "ffmpeg.exe"
+          if (-not (Test-Path -LiteralPath $ffExe)) { throw "ffmpeg.exe embarqué introuvable à côté de l'exe installé : $ffExe" }
+          $ffOut = & $ffExe -version 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe embarqué -version exit $LASTEXITCODE" }
+          if (-not $ffOut) { throw "ffmpeg.exe embarqué -version sans sortie (binaire corrompu ?)" }
+          $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
           $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { Write-Warning "msiexec /x exit $($uninstall.ExitCode)" }
+          if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }
+
+      # Smoke GUI démarrage (NON BLOQUANT, continue-on-error) : détecte un
+      # crash immédiat au lancement de l'exe. Limite assumée : le runner CI
+      # n'a pas de display garanti et aucun headless GTK (broadway/xvfb)
+      # n'existe sur UCRT64, donc ce step reste informatif et ne gate jamais.
+      - name: Smoke GUI démarrage (informatif, non bloquant)
+        continue-on-error: true
+        run: |
+          $exe = "target/release/meeting-recorder-windows.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "exe introuvable : $exe" }
+          $env:GDK_BACKEND = "win32"
+          $p = Start-Process $exe -NoNewWindow -PassThru
+          try {
+            if ($p.WaitForExit(15000)) {
+              if ($p.ExitCode -ne 0) { throw "l'exe a quitté en 15 s avec le code $($p.ExitCode) (crash au démarrage ?)" }
+              Write-Output "[ci] GUI smoke : sortie immédiate code 0"
+            } else {
+              Write-Output "[ci] GUI smoke : toujours vivant après 15 s (pas de crash au démarrage)"
+            }
+          } finally {
+            try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force } } catch {}
+          }
 
       - name: Upload msi-stage (diagnostic closure)
         if: always()

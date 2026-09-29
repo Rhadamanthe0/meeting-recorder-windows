@@ -347,6 +347,11 @@ struct Recorder {
 
     mic: Source,
     system: Source,
+    /// A capture init failure already toasted: warn once per outage, not
+    /// every 500 ms. Reset when both sources capture fine again.
+    /// (Windows only: `Source::init_error` n'existe que là-bas.)
+    #[cfg(target_os = "windows")]
+    capture_warned: Cell<bool>,
     shared: SharedStatus,
     hub: std::rc::Weak<Hub>,
 
@@ -805,6 +810,8 @@ impl Recorder {
             current_line: Cell::new(-1),
             mic,
             system,
+            #[cfg(target_os = "windows")]
+            capture_warned: Cell::new(false),
             shared,
             hub: Rc::downgrade(hub),
             state: Cell::new(State::Idle),
@@ -993,6 +1000,12 @@ impl Recorder {
                 r.highlight(ms);
             }
         });
+        let weak = Rc::downgrade(self);
+        self.player.connect_error(move || {
+            if let Some(r) = weak.upgrade() {
+                r.toast("Could not start playback");
+            }
+        });
 
         let weak = Rc::downgrade(self);
         self.chapters_list.connect_row_activated(move |_, row| {
@@ -1081,7 +1094,9 @@ impl Recorder {
             let Some(r) = weak.upgrade() else { return };
             if let Some(dir) = r.result_dir.borrow().as_ref() {
                 let uri = gio::File::for_path(dir).uri();
-                let _ = platform::open_uri(&uri);
+                if platform::open_uri(&uri).is_err() {
+                    r.toast("Could not open the folder");
+                }
             }
         });
 
@@ -1255,8 +1270,13 @@ impl Recorder {
                     if let Some(url) = outcome.url {
                         toast.set_button_label(Some("Open"));
                         toast.set_timeout(15);
+                        let weak = Rc::downgrade(&this);
                         toast.connect_button_clicked(move |_| {
-                            let _ = platform::open_uri(&url);
+                            if platform::open_uri(&url).is_err()
+                                && let Some(r) = weak.upgrade()
+                            {
+                                r.toast("Could not open the link");
+                            }
                         });
                     }
                     toast
@@ -1441,6 +1461,8 @@ impl Recorder {
     }
 
     fn tick(&self) {
+        #[cfg(target_os = "windows")]
+        self.warn_capture_once();
         if self.state.get() == State::Recording {
             let elapsed = self.elapsed();
             let clock = format_elapsed(elapsed);
@@ -1455,6 +1477,28 @@ impl Recorder {
             self.compact_timer.set_label(&clock);
             self.dot.set_opacity(opacity);
             self.compact_dot.set_opacity(opacity);
+        }
+    }
+
+    /// Warns once per outage when a capture source refuses to start (exotic
+    /// mix format, missing device, …), instead of silently recording zeros.
+    /// Runs on the UI thread from `tick` (500 ms): two mutex reads, no block.
+    #[cfg(target_os = "windows")]
+    fn warn_capture_once(&self) {
+        let failing = self
+            .mic
+            .init_error()
+            .map(|step| ("Microphone", step))
+            .or_else(|| self.system.init_error().map(|step| ("System audio", step)));
+        match failing {
+            Some((who, step)) if !self.capture_warned.get() => {
+                self.capture_warned.set(true);
+                self.toast(&format!(
+                    "{who} capture failed ({step}): check your input device"
+                ));
+            }
+            None => self.capture_warned.set(false),
+            _ => {}
         }
     }
 
@@ -2537,18 +2581,30 @@ impl Recorder {
     }
 
     fn store_chapters(self: &Rc<Self>, dir: &std::path::Path, list: &[Chapter], agent: &Agent) {
+        let mut saved = true;
         if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
             manifest.chapters = list.to_vec();
             manifest.chapters_by = Some(agent.id.clone());
-            let _ = meeting::write(dir, manifest);
+            if meeting::write(dir, manifest).is_err() {
+                saved = false;
+            }
         }
         let transcript = dir.join("transcript.md");
-        if let Ok(text) = std::fs::read_to_string(&transcript) {
-            let _ = std::fs::write(&transcript, chapters::apply_to_markdown(&text, list));
+        match std::fs::read_to_string(&transcript) {
+            Ok(text) => {
+                if std::fs::write(&transcript, chapters::apply_to_markdown(&text, list)).is_err() {
+                    saved = false;
+                }
+            }
+            Err(_) => saved = false,
         }
         let text = std::fs::read_to_string(&transcript).ok();
         self.show_transcript(text.as_deref(), None);
-        self.toast(&format!("{} chapters added", list.len()));
+        if saved {
+            self.toast(&format!("{} chapters added", list.len()));
+        } else {
+            self.toast("Could not save the chapters");
+        }
     }
 
     /// One paragraph of the transcript: time, speaker and text in columns, with
@@ -3026,13 +3082,25 @@ impl Recorder {
             .filter(|(from, to)| from != to)
             .collect();
         let transcript = dir.join("transcript.md");
-        if let Ok(text) = std::fs::read_to_string(&transcript) {
-            let _ = std::fs::write(&transcript, meeting::relabel_all(&text, &renames));
+        let mut saved = true;
+        match std::fs::read_to_string(&transcript) {
+            Ok(text) => {
+                if std::fs::write(&transcript, meeting::relabel_all(&text, &renames)).is_err() {
+                    saved = false;
+                }
+            }
+            Err(_) => saved = false,
         }
         let you_changed = manifest.imported.is_none() && names.first() != manifest.speakers.first();
         if let Some(m) = self.manifest.borrow_mut().as_mut() {
             m.speakers = names.clone();
-            let _ = meeting::write(&dir, m);
+            if meeting::write(&dir, m).is_err() {
+                saved = false;
+            }
+        }
+        if !saved {
+            self.toast("Could not save the speaker names");
+            return;
         }
         if you_changed && let Some(you) = names.first() {
             settings::save_your_name(you);
@@ -3070,11 +3138,14 @@ impl Recorder {
         // The folder the meeting is in now: renamed, or the numbered one it had.
         let target = if renamed { target } else { current };
         let mut retitled = false;
+        let mut saved = true;
         if let Some(manifest) = self.manifest.borrow_mut().as_mut()
             && manifest.title != title
         {
             manifest.title = title.clone();
-            let _ = meeting::write(&target, manifest);
+            if meeting::write(&target, manifest).is_err() {
+                saved = false;
+            }
             retitled = true;
         }
         if !renamed && !retitled {
@@ -3085,9 +3156,15 @@ impl Recorder {
             && let Some(rest) = text.strip_prefix("# ")
         {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
-            let _ = std::fs::write(&transcript, format!("# {title}\n{body}"));
+            if std::fs::write(&transcript, format!("# {title}\n{body}")).is_err() {
+                saved = false;
+            }
         }
-        self.toast("Saved");
+        if saved {
+            self.toast("Saved");
+        } else {
+            self.toast("Could not save the title");
+        }
     }
 
     fn close_when_done(&self) {
