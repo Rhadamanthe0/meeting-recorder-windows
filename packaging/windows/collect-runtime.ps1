@@ -199,6 +199,87 @@ if (-not (Test-Path -LiteralPath $srcIcons)) {
 Copy-Item -LiteralPath $srcIcons -Destination (Join-Path $Stage "share\icons") -Recurse -Force
 Write-Output "[stage] + share/icons"
 
+# --- 5b. Icône des raccourcis MSI (stage/app.ico, multi-tailles) ---
+# L'exe n'embarque aucune icône (pas de winres) : Product.wxs pointe son
+# <Icon Id="AppIcon"> vers ce .ico. Construit en PowerShell pur (format ICO
+# à entrées PNG, Vista+ : ICONDIR + entrées width/height/planes=1/bpp=32 +
+# données PNG, dimensions lues dans l'IHDR PNG, 256 -> octet 0) depuis les
+# PNG fullcolor Adwaita déjà au stage (audio-input-microphone, l'icône micro
+# de l'amont, PAS le symbolic). ÉCHEC EXPLICITE si une taille manque.
+$iconStage = Join-Path $Stage "share\icons"
+$wantedSizes = @(16, 22, 24, 32, 48, 256)
+function Get-PngSize([string]$path) {
+    $fs = [System.IO.File]::OpenRead($path)
+    try {
+        $buf = New-Object byte[] 24
+        if ($fs.Read($buf, 0, 24) -lt 24) {
+            Write-Error "PNG tronqué (moins de 24 octets) : '$path'."
+        }
+        $sig = @(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+        for ($i = 0; $i -lt 8; $i++) {
+            if ($buf[$i] -ne $sig[$i]) { Write-Error "Signature PNG invalide : '$path'." }
+        }
+        if ([System.Text.Encoding]::ASCII.GetString($buf, 12, 4) -ne "IHDR") {
+            Write-Error "Premier chunk non-IHDR : '$path' (PNG non standard ?)."
+        }
+        $w = ($buf[16] * 16777216) + ($buf[17] * 65536) + ($buf[18] * 256) + $buf[19]
+        $h = ($buf[20] * 16777216) + ($buf[21] * 65536) + ($buf[22] * 256) + $buf[23]
+        if ($w -le 0 -or $w -gt 256 -or $w -ne $h) {
+            Write-Error "Dimensions PNG inattendues (${w}x${h}, carré <=256 requis) : '$path'."
+        }
+        return $w
+    } finally { $fs.Close() }
+}
+$iconCandidates = @(Get-ChildItem -LiteralPath $iconStage -Filter "audio-input-microphone.png" -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch "symbolic" } |
+    Sort-Object { if ($_.FullName -match "Adwaita") { 0 } else { 1 } }, FullName)
+if (-not $iconCandidates -or $iconCandidates.Count -eq 0) {
+    Write-Error "Icône micro introuvable : aucun 'audio-input-microphone.png' (non-symbolic) sous '$iconStage' (paquet adwaita-icon-theme incomplet ?)."
+}
+$pngBySize = @{}
+foreach ($cand in $iconCandidates) {
+    $size = Get-PngSize $cand.FullName
+    if (($wantedSizes -contains $size) -and (-not $pngBySize.ContainsKey($size))) {
+        $pngBySize[$size] = $cand.FullName
+    }
+}
+$missingSizes = @($wantedSizes | Where-Object { -not $pngBySize.ContainsKey($_) })
+if ($missingSizes.Count -gt 0) {
+    $foundSizes = @($pngBySize.Keys | Sort-Object) -join ", "
+    Write-Error "Tailles PNG manquantes pour app.ico : $($missingSizes -join ', ') (trouvées : $foundSizes ; cherché 'audio-input-microphone.png' non-symbolic sous '$iconStage')."
+}
+$icoImages = @($wantedSizes | Sort-Object | ForEach-Object {
+    @{ Size = $_; Data = [System.IO.File]::ReadAllBytes($pngBySize[$_]) }
+})
+$icoStream = New-Object System.IO.MemoryStream
+$icoWriter = New-Object System.IO.BinaryWriter($icoStream)
+$icoWriter.Write([uint16]0)
+$icoWriter.Write([uint16]1)
+$icoWriter.Write([uint16]$icoImages.Count)
+$icoOffset = 6 + 16 * $icoImages.Count
+foreach ($img in $icoImages) {
+    $dim = if ($img.Size -eq 256) { 0 } else { $img.Size }
+    $icoWriter.Write([byte]$dim)
+    $icoWriter.Write([byte]$dim)
+    $icoWriter.Write([byte]0)
+    $icoWriter.Write([byte]0)
+    $icoWriter.Write([uint16]1)
+    $icoWriter.Write([uint16]32)
+    $icoWriter.Write([uint32]$img.Data.Length)
+    $icoWriter.Write([uint32]$icoOffset)
+    $icoOffset += $img.Data.Length
+}
+foreach ($img in $icoImages) { $icoStream.Write($img.Data, 0, $img.Data.Length) }
+$icoWriter.Flush()
+$icoPath = Join-Path $Stage "app.ico"
+[System.IO.File]::WriteAllBytes($icoPath, $icoStream.ToArray())
+$icoWriter.Close()
+if (-not (Test-Path -LiteralPath $icoPath)) {
+    Write-Error "Écriture de '$icoPath' impossible (disque plein ou chemin invalide ?)."
+}
+$icoLen = (Get-Item -LiteralPath $icoPath).Length
+Write-Output ("[stage] + app.ico (" + (($wantedSizes | Sort-Object | ForEach-Object { "${_}x${_}" }) -join "+") + " : $icoLen o)")
+
 # --- 6. ffmpeg + ffprobe (src/export.rs : à côté de l'exe ou au PATH) ---
 function Find-LocalTool([string]$name) {
     $hits = @()

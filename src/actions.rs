@@ -23,6 +23,9 @@ use crate::platform::silent_command;
 
 /// How actions work, for people and their agents; the done page links here
 /// when there are none yet.
+#[cfg(target_os = "windows")]
+pub const DOCS: &str = "https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows/blob/main/docs/actions-windows.md";
+#[cfg(not(target_os = "windows"))]
 pub const DOCS: &str =
     "https://github.com/jankeesvw/omarchy-meeting-recorder/blob/main/docs/actions.md";
 
