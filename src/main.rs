@@ -32,7 +32,7 @@ pub const APP_NAME: &str = "omarchy-meeting-recorder";
 // Erreurs ignorées silencieusement : pas de log, pas de panic.
 #[cfg(windows)]
 fn attach_parent_console() {
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     unsafe {
         AttachConsole(ATTACH_PARENT_PROCESS);
     }
@@ -42,9 +42,7 @@ fn main() -> glib::ExitCode {
     #[cfg(windows)]
     attach_parent_console();
     match std::env::args().nth(1).as_deref() {
-        None => {
-            ui::run(None)
-        }
+        None => ui::run(None),
         Some("--version" | "-V") => {
             let backend = if cfg!(feature = "vulkan") {
                 "Vulkan support; CPU fallback"

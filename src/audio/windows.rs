@@ -18,9 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{CHANNELS, HISTORY, RATE};
-use wasapi::{
-    DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta,
-};
+use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta};
 
 /// 20 ms of s16le audio.
 const CHUNK_BYTES: usize = (RATE / 50 * 2 * CHANNELS) as usize;
@@ -248,7 +246,11 @@ fn frame_channel_f32(raw: &[u8], frame: usize, channel: usize, desc: &MixDesc) -
     match desc.kind {
         SampleKind::F32 => {
             let v = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
-            if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
+            if v.is_finite() {
+                v.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
         }
         SampleKind::I16 => i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0,
         SampleKind::I24 => {
@@ -258,9 +260,7 @@ fn frame_channel_f32(raw: &[u8], frame: usize, channel: usize, desc: &MixDesc) -
             }
             v as f32 / 8_388_608.0
         }
-        SampleKind::I32 => {
-            i32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f32 / 2_147_483_648.0
-        }
+        SampleKind::I32 => i32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f32 / 2_147_483_648.0,
     }
 }
 

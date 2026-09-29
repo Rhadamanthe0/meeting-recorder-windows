@@ -21,15 +21,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
+use rodio::Source as RodioSource;
+#[cfg(target_os = "windows")]
+use rodio::{Decoder, OutputStream, Sink};
+#[cfg(target_os = "windows")]
 use std::fs::File;
 #[cfg(target_os = "windows")]
 use std::io::{BufReader, Read};
 #[cfg(target_os = "windows")]
 use std::process::ChildStdout;
-#[cfg(target_os = "windows")]
-use rodio::{Decoder, OutputStream, Sink};
-#[cfg(target_os = "windows")]
-use rodio::Source as RodioSource;
 
 use gtk::prelude::*;
 use gtk::{gio, glib};

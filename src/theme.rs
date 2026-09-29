@@ -211,27 +211,27 @@ pub fn follow(changed: impl Fn() + 'static) {
     #[cfg(not(target_os = "windows"))]
     {
         let file = gio::File::for_path(dir());
-    let Ok(monitor) =
-        file.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
-    else {
-        return;
-    };
-    let pending = std::rc::Rc::new(std::cell::Cell::new(false));
-    let apply = std::rc::Rc::new(apply);
-    let changed = std::rc::Rc::new(changed);
-    monitor.connect_changed(move |_, _, _, _| {
-        if pending.replace(true) {
+        let Ok(monitor) =
+            file.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        else {
             return;
-        }
-        let (pending, apply, changed) = (pending.clone(), apply.clone(), changed.clone());
-        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
-            pending.set(false);
-            apply();
-            changed();
+        };
+        let pending = std::rc::Rc::new(std::cell::Cell::new(false));
+        let apply = std::rc::Rc::new(apply);
+        let changed = std::rc::Rc::new(changed);
+        monitor.connect_changed(move |_, _, _, _| {
+            if pending.replace(true) {
+                return;
+            }
+            let (pending, apply, changed) = (pending.clone(), apply.clone(), changed.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                pending.set(false);
+                apply();
+                changed();
+            });
         });
-    });
-    // The monitor has to outlive this function.
-    std::mem::forget(monitor);
+        // The monitor has to outlive this function.
+        std::mem::forget(monitor);
     }
 }
 
