@@ -73,20 +73,27 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
 /// and the kept `.tracks/` files (`mic.ogg`, `computer.ogg`, `source.ogg`).
 /// Best-effort : a missing artefact (e.g. a lone `evil.meeting-recorder` in
 /// Downloads) is skipped, and the source folder is never written to.
-fn copy_imported_artefacts(src: &std::path::Path, out: &std::path::Path) {
+fn copy_imported_artefacts(src: &std::path::Path, out: &std::path::Path) -> bool {
     for name in ["transcript.md", "audio.ogg", "mic.ogg", "computer.ogg"] {
         let from = src.join(name);
         if from.is_file() {
-            let _ = std::fs::copy(&from, out.join(name));
+            if std::fs::copy(&from, out.join(name)).is_err() {
+                return false;
+            }
         }
     }
     for name in ["mic.ogg", "computer.ogg", "source.ogg"] {
         let from = src.join(export::TRACKS_DIR).join(name);
         if from.is_file() {
-            let _ = std::fs::create_dir_all(out.join(export::TRACKS_DIR));
-            let _ = std::fs::copy(&from, out.join(export::TRACKS_DIR).join(name));
+            if std::fs::create_dir_all(out.join(export::TRACKS_DIR)).is_err() {
+                return false;
+            }
+            if std::fs::copy(&from, out.join(export::TRACKS_DIR).join(name)).is_err() {
+                return false;
+            }
         }
     }
+    true
 }
 
 /// Choices in the import dialog: automatic, then a fixed number.
@@ -2327,7 +2334,11 @@ impl Recorder {
                 self.toast("Could not import this meeting into Meetings");
                 return;
             }
-            copy_imported_artefacts(&dir, &out);
+            if !copy_imported_artefacts(&dir, &out) {
+                let _ = std::fs::remove_dir_all(&out);
+                self.toast("Could not copy the meeting files; nothing was imported");
+                return;
+            }
             dir = out;
         }
         // Folders from before manifests existed get one now. Only inside the
