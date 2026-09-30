@@ -17,6 +17,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use crate::meeting::Manifest;
 use crate::platform::silent_command;
@@ -113,6 +114,11 @@ pub struct Outcome {
     pub url: Option<String>,
 }
 
+/// How long a user action may run before it is killed. Actions may run a
+/// long time (they can call out to scripts and services), so this is roomy:
+/// only a truly hung action hits it.
+const ACTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 /// Runs `action` on the meeting in `dir`. Blocking; the caller runs it off the
 /// main thread.
 pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, String> {
@@ -138,7 +144,7 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
             .arg("meeting-action")
             .arg(dir);
     }
-    let output = shell
+    let mut child = shell
         .current_dir(dir)
         .env("MEETING_DIR", dir)
         .env("MEETING_TRANSCRIPT", dir.join("transcript.md"))
@@ -154,8 +160,28 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
         .env("MEETING_SPEAKERS", manifest.speakers.join("\n"))
         .env("MEETING_AUDIO", audio.unwrap_or_default())
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
+    // `output()` would wait without bound: a hanging action would leak this
+    // thread and leave the "running" toast on screen forever. Poll instead,
+    // like the agent runner does, and kill past the timeout.
+    let started = Instant::now();
+    let output = loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(_) => break child.wait_with_output().map_err(|e| e.to_string())?,
+            None if started.elapsed() >= ACTION_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "timed out after {} minutes",
+                    ACTION_TIMEOUT.as_secs() / 60
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
