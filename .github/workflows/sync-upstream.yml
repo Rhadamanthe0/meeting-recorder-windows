@@ -80,9 +80,17 @@ jobs:
             exit 0
           fi
           # Sans conflit : bump patch, commit, push, PR.
-          # sed repris tel quel de l'existant (teste sur copie).
+          # Ne construire les commandes sed qu'avec une version strictement
+          # numerique : Cargo.toml vient de l'amont et n'est pas fiable.
           VERSION="$(sed -n '3s/version = "\(.*\)"/\1/p' Cargo.toml)"
-          NEW_VERSION="$(echo "$VERSION" | awk -F. '{print $1 "." $2 "." $3 + 1}')"
+          if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Version amont invalide dans Cargo.toml : $VERSION" >&2
+            exit 1
+          fi
+          MAJOR="${BASH_REMATCH[1]}"
+          MINOR="${BASH_REMATCH[2]}"
+          PATCH="${BASH_REMATCH[3]}"
+          NEW_VERSION="$MAJOR.$MINOR.$((10#$PATCH + 1))"
           echo "Bump patch : $VERSION vers $NEW_VERSION"
           sed -i "3s/version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
           sed -i "/name = \"meeting-recorder-windows\"/{n;s/version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.lock
