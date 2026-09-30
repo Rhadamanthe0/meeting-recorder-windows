@@ -10,16 +10,21 @@ name: sync-upstream
 # La PR doit ensuite etre approuvee et fusionnee par un mainteneur. Le
 # workflow ne fusionne ni ne publie jamais du code provenant de l'amont.
 # Deduplication : si une PR sync/upstream-* est deja ouverte en revue,
-# aucun doublon n'est cree. Meme delta (master ancetre du tip et second
-# parent == upstream/main) -> exit 0 sans PR ni bump. Delta different ->
+# aucun doublon n'est cree. Meme delta (master et upstream/main ancetres
+# du tip) -> exit 0 sans PR ni bump. Delta different ->
 # mise a jour sur place de la PR existante (branche temporaire depuis
-# origin/master, merge, meme bump patch, reset --hard + push --force ;
+# origin/master, merge, meme bump patch, checkout -B + push --force-with-lease ;
 # force-push assume sur ces branches bot sync/upstream-* en attente
-# de revue, jamais de merge/tag/dispatch auto).
+# de revue, jamais de merge/tag/release auto).
 on:
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
+
+# Une seule synchronisation active : deux runs ne doivent pas creer deux PR.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -61,13 +66,14 @@ jobs:
           if [ -n "$EXIST_JSON" ]; then
             NUM="$(echo "$EXIST_JSON" | jq -r .number)"
             EXIST_BRANCH="$(echo "$EXIST_JSON" | jq -r .headRefName)"
-            git fetch origin "$EXIST_BRANCH"
+            # checkout@v4 ne cree pas de branche locale pour la PR ouverte.
+            EXIST_REF="refs/remotes/origin/$EXIST_BRANCH"
+            git fetch origin "+refs/heads/$EXIST_BRANCH:$EXIST_REF"
+            EXIST_SHA="$(git rev-parse "$EXIST_REF")"
             UP_SHA="$(git rev-parse upstream/main)"
-            EXIST_SECOND_PARENT=""
-            if git rev-parse --verify --quiet "$EXIST_BRANCH^2" >/dev/null; then
-              EXIST_SECOND_PARENT="$(git rev-parse "$EXIST_BRANCH"^2)"
-            fi
-            if git merge-base --is-ancestor origin/master "$EXIST_BRANCH" && [ "$EXIST_SECOND_PARENT" = "$UP_SHA" ]; then
+            # Le tip est le bump (un parent), pas le merge. L'ascendance
+            # couvre aussi un merge fast-forward suivi du bump.
+            if git merge-base --is-ancestor origin/master "$EXIST_SHA" && git merge-base --is-ancestor "$UP_SHA" "$EXIST_SHA"; then
               echo "PR #$NUM ($EXIST_BRANCH) covers this delta (upstream/main @ $UP_SHA), nothing to do."
               exit 0
             fi
@@ -96,9 +102,8 @@ jobs:
             sed -i "/name = \"meeting-recorder-windows\"/{n;s/version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.lock
             git add Cargo.toml Cargo.lock
             git commit -m "Sync upstream v$NEW_VERSION"
-            git checkout "$EXIST_BRANCH"
-            git reset --hard tmp-sync-reuse
-            git push --force origin "$EXIST_BRANCH"
+            git checkout -B "$EXIST_BRANCH" tmp-sync-reuse
+            git push --force-with-lease="refs/heads/$EXIST_BRANCH:$EXIST_SHA" origin "$EXIST_BRANCH"
             git branch -D tmp-sync-reuse
             BRANCH="$EXIST_BRANCH"
             PR_NUM="$NUM"
