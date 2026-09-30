@@ -73,8 +73,11 @@ class SyncUpstreamTests(unittest.TestCase):
         self.tools.mkdir()
         write(self.tools, 'gh', '#!/bin/bash\nif [ "$1 $2" = "pr list" ]; then\n echo \'{"number":42,"headRefName":"sync/upstream-42"}\'\nelse\n printf "%s\\n" "$*" >> "$TEST_EVENTS"\nfi\n')
         write(self.tools, 'jq', '#!/bin/bash\ncat >/dev/null\ncase "$2" in\n .number) echo 42 ;;\n .headRefName) echo sync/upstream-42 ;;\n *) exit 1 ;;\nesac\n')
+        # Sous POSIX, Bash ignore les scripts non executables dans PATH.
+        for name in ('gh', 'jq'):
+            (self.tools / name).chmod(0o755)
         self.events = self.root / 'events'
-        self.env.update(TEST_EVENTS=str(self.events),
+        self.env.update(TEST_EVENTS=str(self.events), TEST_TOOLS=str(self.tools),
                         PATH=str(self.tools) + os.pathsep + str(Path(BASH).parent) + os.pathsep + self.env['PATH'])
 
     def bump(self):
@@ -88,13 +91,34 @@ class SyncUpstreamTests(unittest.TestCase):
         git(self.runner, 'remote', 'add', 'upstream', str(self.seed))
         git(self.runner, 'fetch', 'upstream', 'upstream:refs/remotes/upstream/main')
         script = self.root / 'workflow.sh'
-        script.write_text(workflow_script(), encoding='utf-8', newline='\n')
+        # Refuser tout CLI reel si la resolution des simulations regresse.
+        guard = '''for tool in gh jq; do
+  [[ -x "$TEST_TOOLS/$tool" && "$(type -P "$tool")" -ef "$TEST_TOOLS/$tool" ]] || exit 99
+done
+'''
+        script.write_text(guard + workflow_script(), encoding='utf-8', newline='\n')
         # Les remotes sont des chemins locaux. Aucun acces reseau ni appel GitHub.
         result = subprocess.run([BASH, str(script)], cwd=self.runner, env=self.env,
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('pr create', self.events.read_text() if self.events.exists() else '')
         return result.stdout
+
+    def test_mock_cli_precedes_executable_fallback(self):
+        fallback = self.root / 'fallback'
+        fallback.mkdir()
+        for name in ('gh', 'jq'):
+            write(fallback, name, '#!/bin/bash\necho SAFE_FALLBACK\n')
+            (fallback / name).chmod(0o755)
+        env = self.env.copy()
+        env['PATH'] = str(self.tools) + os.pathsep + str(fallback) + os.pathsep + env['PATH']
+        # Une sentinelle locale capture tout repli, sans appeler de CLI reel.
+        result = subprocess.run([BASH, '-c', 'gh pr list; printf "{}" | jq -r .number'],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['{"number":42,"headRefName":"sync/upstream-42"}', '42'])
+        self.assertFalse(self.events.exists())
 
     def test_identical_merge_and_bump_in_fresh_checkout(self):
         output = self.run_workflow()
