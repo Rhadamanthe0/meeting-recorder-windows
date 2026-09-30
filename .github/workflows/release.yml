@@ -18,11 +18,13 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
@@ -30,7 +32,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Dispatch manuel : aligne le contenu sur le tag s'il existe déjà sur
       # origin, sinon reste sur master (le numéro de version vient alors de
@@ -51,7 +53,7 @@ jobs:
 
       # Même stratégie GTK que windows.yml : hôte GNU aligné sur MinGW UCRT64.
       - name: Install Rust stable GNU
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
@@ -62,10 +64,10 @@ jobs:
         run: rustc -vV
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install GTK4 (MSYS2 UCRT64)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
           update: true
@@ -76,20 +78,11 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-clang
 
-      # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
-      - name: Install ffmpeg
-        run: |
-          winget install --exact --accept-source-agreements --accept-package-agreements Gyan.FFmpeg
-          $ff = $null
-          try { $ff = (Get-Command ffmpeg.exe -ErrorAction Stop).Source } catch {}
-          if (-not $ff) {
-            $pkg = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
-            if (Test-Path $pkg) { $ff = Get-ChildItem -Path $pkg -Filter "ffmpeg.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName } }
-          }
-          if (-not $ff -or -not (Test-Path $ff)) { throw "ffmpeg.exe introuvable après winget install Gyan.FFmpeg" }
-          Split-Path $ff -Parent >> $env:GITHUB_PATH
-          & $ff -version | Select-Object -First 2
-          Write-Output "[ci] ffmpeg=$ff"
+      # Pas de ffmpeg live au PATH en release : le collector télécharge toujours
+      # le ZIP pinné vérifié (GyanD/codexffmpeg 9.0.2, SHA-256 + taille contrôlés,
+      # MR_FFMPEG_PINNED_ONLY=1 sur le step Build MSI). Le PATH ne doit plus
+      # fournir ffmpeg au build release (ancien step live supprimé : paquet
+      # mutable non versionné, exécuté via -version).
 
       - name: Expose GTK au build GNU
         run: |
@@ -124,11 +117,16 @@ jobs:
           Write-Output "[ci] pkgconf=$p"
 
       # ORT dynamique : binaires Microsoft 1.28 pour ort-sys GNU (sans précompilés GNU).
+      # Hash source : api.github.com repos/microsoft/onnxruntime releases/tags/v1.28.0,
+      # champ digest de l'asset onnxruntime-win-x64-1.28.0.zip (size 78796801).
       - name: ORT dynamique Microsoft 1.28
         run: |
           $ortZip = Join-Path $env:RUNNER_TEMP "ort.zip"
           $ortDir = Join-Path $env:RUNNER_TEMP "ort"
           Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip" -OutFile $ortZip
+          $expected = "abef733dacbe2f571547a7150b479b5cb9cc0df22f96c24983a42cadb1b4f8bc"
+          $actual = (Get-FileHash -LiteralPath $ortZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 ORT inattendu : $actual (attendu $expected)" }
           Expand-Archive -LiteralPath $ortZip -DestinationPath $ortDir -Force
           $ortRoot = Join-Path $ortDir "onnxruntime-win-x64-1.28.0"
           $ortLib = Join-Path $ortRoot "lib"
@@ -139,17 +137,38 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
-      # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
-      # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
-      - name: Generate lockfile
-        run: cargo generate-lockfile
+      # Tests (export.rs) : ffmpeg réel exigé (spawn via `.unwrap()`), fourni
+      # sans winget : ZIP GyanD/codexffmpeg 9.0.2 pinné vérifié (taille +
+      # SHA-256 AVANT Expand-Archive). Seul le dossier `bin` rejoint le PATH.
+      # Hash source : api.github.com GyanD/codexffmpeg releases/tags/9.0.2,
+      # digest officiel de l'asset ffmpeg-9.0.2-essentials_build.zip.
+      - name: Provide ffmpeg for tests (pinned, verified)
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-tests.zip"
+          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" -OutFile $zip
+          $size = (Get-Item -LiteralPath $zip).Length
+          if ($size -ne 114768076) { throw "ZIP FFmpeg tests rejeté : taille $size o (attendu 114768076 o)" }
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba") { throw "ZIP FFmpeg tests rejeté : SHA-256 $hash inattendu" }
+          $dir = Join-Path $env:RUNNER_TEMP "ffmpeg-tests"
+          if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          $bin = Get-ChildItem -LiteralPath $dir -Directory | ForEach-Object { Join-Path $_.FullName "bin" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $bin) { throw "bin/ffmpeg.exe introuvable dans le ZIP FFmpeg tests" }
+          $bin >> $env:GITHUB_PATH
+          $env:PATH = "$bin;$env:PATH"
+          ffmpeg.exe -version | Select-Object -First 2
 
-      # Contrôle sur le lock régénéré ci-dessus.
+      # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
+      # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked
+      # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
+      # à jour par PR relue, pas en CI.
+      # Contrôle sur le lock commité.
       - name: Check
-        run: cargo check
+        run: cargo check --locked
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
       - name: Diagnostic libs statiques
@@ -161,25 +180,21 @@ jobs:
           Get-ChildItem -Path "target" -Include *.a,*.lib -Recurse -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Output ("[ci] lib: " + $_.FullName + " (" + $_.Length + " o)") }
 
       - name: Build release (Vulkan OFF by default)
-        run: cargo build --release
+        run: cargo build --release --locked
 
-      # Remplace les symlinks copy-dylibs par de vrais fichiers DLL (symlink-safe).
+      # Allowlist ORT vers target/release : onnxruntime.dll + providers
+      # uniquement (jamais de *.dll aveugle). Remplace aussi les symlinks
+      # copy-dylibs par de vrais fichiers (symlink-safe).
       - name: Copie DLL ORT vers target/release
         run: |
-          Get-ChildItem (Join-Path $env:ORT_LIB_LOCATION "*.dll") | ForEach-Object {
-            $dest = Join-Path "target/release/" $_.Name
-            if (Test-Path $dest) { Remove-Item $dest -Force }
-            Copy-Item $_.FullName $dest -Force
+          foreach ($pat in @("onnxruntime.dll", "onnxruntime_providers_*.dll")) {
+            Get-ChildItem (Join-Path $env:ORT_LIB_LOCATION $pat) -ErrorAction SilentlyContinue | ForEach-Object {
+              $dest = Join-Path "target/release/" $_.Name
+              if (Test-Path $dest) { Remove-Item $dest -Force }
+              Copy-Item $_.FullName $dest -Force
+            }
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
-
-      # Lock régénéré à récupérer pour le committer ensuite.
-      - name: Upload Cargo.lock régénéré
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock
-          if-no-files-found: warn
-          path: Cargo.lock
 
       # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
       # seulement si candle est absent.
@@ -204,6 +219,9 @@ jobs:
       - name: Build MSI
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          # CI strict : le collector ignore toute copie locale (PATH/TargetRelease)
+          # et embarque uniquement le ZIP FFmpeg pinné vérifié.
+          MR_FFMPEG_PINNED_ONLY: "1"
         run: |
           $version = "0.1.0"
           $ref = $env:GITHUB_REF_NAME
@@ -223,7 +241,7 @@ jobs:
           Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
 
       - name: Upload MSI Windows x86_64
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-msi
           if-no-files-found: error
@@ -232,9 +250,11 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download MSI Windows x86_64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
           path: dist
@@ -242,7 +262,7 @@ jobs:
       # Le MSI embarque tout (exe + ORT + MinGW + closure GTK + ffmpeg) et
       # remplace les anciens assets loose (exe + DLLs + script d'install).
       - name: Publie la release GitHub
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
