@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   tag:
@@ -23,6 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Tag release if version untagged
+        id: tag
         run: |
           set -e
           VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -35,4 +37,18 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "v$VERSION" -m "v$VERSION"
           git push origin "v$VERSION"
+          echo "created=true" >> "$GITHUB_OUTPUT"
           echo "Tag v$VERSION cree et pousse (declenche release.yml)."
+
+      # Le push de tag ci-dessus, effectue avec le GITHUB_TOKEN, ne declenche
+      # PAS release.yml (anti-boucle GitHub : les pushs du token par defaut
+      # n'emettent aucun evenement declencheur — preuve : le tag v0.1.10 cree
+      # par ce workflow n'a lance aucune release, dispatch manuel requis).
+      # D'ou ce dispatch explicite, comme sync-upstream.yml apres son tag.
+      - name: Dispatch release (contourne l'anti-boucle GITHUB_TOKEN)
+        if: steps.tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          gh workflow run release.yml --ref master -f tag=v$VERSION
