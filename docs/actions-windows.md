@@ -123,7 +123,7 @@ nor App Paths, so use the installed full path:
   vs `~/.config/omarchy-meeting-recorder/config.toml`.
 - helper binary: `"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe"` vs `omarchy-meeting-recorder`.
 - the "Add actions…" button on the done page opens this page
-  (`actions::DOCS` on Windows, via `platform::open_uri` → `cmd /C start`);
+  (`actions::DOCS` on Windows, via `platform::open_uri` → `ShellExecuteW`);
   on Unix it opens the upstream `docs/actions.md`.
 
 ## Note on `examples/actions/*`

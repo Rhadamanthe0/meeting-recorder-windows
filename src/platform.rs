@@ -121,29 +121,40 @@ pub fn runtime_dir() -> PathBuf {
 /// l'application par défaut.
 ///
 /// Sur Windows `gio::AppInfo::launch_default_for_uri` échoue silencieusement,
-/// donc on passe par `cmd /C start "" <uri>` : le `""` est le titre vide
-/// exigé par `start` (sans lui l'URI serait prise pour un titre). Le
-/// `CREATE_NO_WINDOW` de [`silent_command`] évite tout flash de console.
-/// L'URI est quotée (voir [`quote_for_cmd`]) : sans cela `cmd` couperait
-/// l'URI sur `&`/`|`/`^` (`obsidian://open?vault=V&file=F` lancerait `file=F`
-/// comme commande) ou étendrait `%var%`. Le `start` détache le navigateur
-/// puis termine aussitôt, donc attendre sa fin ne bloque pas l'UI de façon
-/// perceptible ; son code de sortie non nul devient `Err` pour que l'appelant
-/// puisse toaster l'échec.
+/// donc on appelle directement `ShellExecuteW`. Cela confie l'URI au handler
+/// enregistré sans passer par un interpréteur de commandes.
 /// Sur Unix, simple délégation à gio (comportement amont inchangé).
 pub fn open_uri(uri: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        let status = silent_command("cmd")
-            .args(["/C", "start", ""])
-            .raw_arg(quote_for_cmd(uri))
-            .status()?;
-        if status.success() {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        if uri.contains('\0') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "URI contains a NUL character",
+            ));
+        }
+        let uri_wide: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `uri_wide` is NUL-terminated and remains alive for the call;
+        // all optional pointer parameters are null as permitted by ShellExecuteW.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                uri_wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result as isize > 32 {
             Ok(())
         } else {
             Err(std::io::Error::other(format!(
-                "`cmd /C start` exited with {status}"
+                "ShellExecuteW failed with code {}",
+                result as isize
             )))
         }
     }
@@ -155,21 +166,9 @@ pub fn open_uri(uri: &str) -> std::io::Result<()> {
     }
 }
 
-/// Quote une URI pour `cmd /C start "" <uri>`.
-///
-/// `%` est laissé tel quel : à `/C` (contrairement à un fichier batch)
-/// `%%` n'est PAS replié en `%`, donc doubler `%` corrompt les URI
-/// encodées (`%20`, `%2F`, …) ; revers assumé : `%var%` peut être
-/// étendu par `cmd`.
-/// `&`/`|`/`^`/`<`/`>` sont littéraux entre guillemets. `"` ne peut pas survivre intact dans une
-/// URI entre guillemets `cmd`, il est retiré pour ne pas en sortir.
-fn quote_for_cmd(uri: &str) -> String {
-    format!("\"{}\"", uri.replace('"', ""))
-}
-
 /// Construit un `Command` qui reste invisible sur Windows.
 ///
-/// `ffmpeg`/`ffprobe` (builds Gyan) et `cmd` sont des applications console :
+/// `ffmpeg`/`ffprobe` (builds Gyan) sont des applications console :
 /// sans `CREATE_NO_WINDOW` chaque spawn ouvre un flash de console. Sur Unix,
 /// simple passthrough de `Command::new` (args/stdio inchangés aux call sites).
 pub fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -195,23 +194,5 @@ mod tests {
         let debug = format!("{command:?}");
         assert!(debug.contains("ffmpeg"), "{debug}");
         assert!(debug.contains("-version"), "{debug}");
-    }
-
-    #[test]
-    fn cmd_quoting_keeps_metachars_and_percent_intact() {
-        // `&` doit rester dans l'URI au lieu de séparer deux commandes…
-        assert_eq!(
-            quote_for_cmd("obsidian://open?vault=V&file=F"),
-            "\"obsidian://open?vault=V&file=F\""
-        );
-        // …`%20` doit survivre tel quel : à `/C` (contrairement à un
-        // batch) `%%` n'est PAS replié — `cmd /C echo "a%%20b"` affiche
-        // `a%%20b` — donc doubler `%` corrompt les URI encodées…
-        assert_eq!(
-            quote_for_cmd("obsidian://open?file=a%20b"),
-            "\"obsidian://open?file=a%20b\""
-        );
-        // …et `"` ne doit pas permettre de sortir des guillemets.
-        assert_eq!(quote_for_cmd("https://x/a\"|b"), "\"https://x/a|b\"");
     }
 }
