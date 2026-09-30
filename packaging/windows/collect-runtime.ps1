@@ -199,6 +199,19 @@ if (-not (Test-Path -LiteralPath $srcIcons)) {
 Copy-Item -LiteralPath $srcIcons -Destination (Join-Path $Stage "share\icons") -Recurse -Force
 Write-Output "[stage] + share/icons"
 
+# --- 5b. Icône des raccourcis MSI (stage/app.ico, multi-tailles) ---
+# L'exe n'embarque aucune icône (pas de winres) : Product.wxs pointe son
+# <Icon Id="AppIcon"> vers ce .ico. Icône maison committée
+# (packaging/windows/app.ico, 16/24/32/48/256) copiée telle quelle :
+# déterministe, zéro dépendance CI (remplace le scraping Adwaita, dont le
+# paquet MSYS2 ne fournit aucun PNG micro non-symbolic). ÉCHEC EXPLICITE
+# si le fichier est absent.
+$iconSrc = Join-Path $PSScriptRoot "app.ico"
+if (-not (Test-Path -LiteralPath $iconSrc)) {
+    Write-Error "Icône introuvable : '$iconSrc' (fichier committé manquant ?)."
+}
+Copy-ToStage $iconSrc "app.ico"
+
 # --- 6. ffmpeg + ffprobe (src/export.rs : à côté de l'exe ou au PATH) ---
 function Find-LocalTool([string]$name) {
     $hits = @()

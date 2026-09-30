@@ -60,6 +60,21 @@
                            Value="[INSTALLFOLDER]share\glib-2.0\schemas"
                            Part="all" Action="set" System="no" Permanent="no" />
             </Component>
+            <!-- Association .meeting-recorder per-user (double-clic = done page).
+                 ProgId MeetingRecorder.Meeting + Extension .meeting-recorder en
+                 HKCU Software\Classes uniquement (sans admin) : main.rs ouvre
+                 déjà un chemin `.meeting-recorder` ou dossier via ui::run. -->
+            <Component Id="FileAssoc" Guid="*">
+              <RegistryValue Root="HKCU" Key="Software\Classes\.meeting-recorder"
+                             Value="MeetingRecorder.Meeting"
+                             Type="string" KeyPath="yes" />
+              <RegistryValue Root="HKCU" Key="Software\Classes\MeetingRecorder.Meeting"
+                             Value="Meeting Recorder Meeting"
+                             Type="string" KeyPath="no" />
+              <RegistryValue Root="HKCU" Key="Software\Classes\MeetingRecorder.Meeting\shell\open\command"
+                             Value="&quot;[INSTALLFOLDER]meeting-recorder-windows.exe&quot; &quot;%1&quot;"
+                             Type="string" KeyPath="no" />
+            </Component>
           </Directory>
         </Directory>
       </Directory>
@@ -69,12 +84,13 @@
       <Directory Id="DesktopFolder" />
     </Directory>
 
-    <Icon Id="AppIcon" SourceFile="$(var.StageDir)\meeting-recorder-windows.exe" />
+    <Icon Id="AppIcon" SourceFile="$(var.StageDir)\app.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <Feature Id="Main" Title="Meeting Recorder" Level="1">
       <ComponentRef Id="MainExe" />
       <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="FileAssoc" />
       <ComponentRef Id="EnvSchemas" />
       <ComponentGroupRef Id="HarvestedFiles" />
     </Feature>
