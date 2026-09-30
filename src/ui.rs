@@ -2564,7 +2564,7 @@ impl Recorder {
             // started in the same minute — is left alone.
             let current = this.result_dir.borrow().clone();
             let Some(dir) = current
-                .filter(|d| chapters_still_current(&dir, gen_started, d, this.started_at.get()))
+                .filter(|d| Recorder::chapters_still_current(&dir, gen_started, d, this.started_at.get()))
             else {
                 return;
             };
