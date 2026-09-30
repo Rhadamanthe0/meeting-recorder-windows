@@ -6,12 +6,9 @@ name: sync-upstream
 # `workflow_dispatch`/`repository_dispatch`. La chaine est donc construite
 # en dispatches explicites, sans PAT :
 #   sync-upstream --(dispatch)--> windows.yml (CI sur la branche sync)
-#   sync-upstream --(merge direct, check `build` du run dispatche)--> master
-#   sync-upstream --(tag + dispatch)--> release.yml (MSI)
-# Le tag pousse par ce workflow (GITHUB_TOKEN) ne declenche PAS release.yml
-# (anti-boucle) : c'est le dispatch explicite `gh workflow run release.yml
-# -f tag=vX.Y.Z` qui publie la release. `tag-on-version.yml` (push master)
-# ne tourne donc pas sur les merges bot -> pas de doublon de tag.
+#   sync-upstream --(check `build` du run dispatche)--> PR a examiner
+# La PR doit ensuite etre approuvee et fusionnee par un mainteneur. Le
+# workflow ne fusionne ni ne publie jamais du code provenant de l'amont.
 on:
   schedule:
     - cron: "0 4 * * *"
@@ -36,7 +33,7 @@ jobs:
           git remote add upstream https://github.com/jankeesvw/omarchy-meeting-recorder.git
           git fetch upstream main
 
-      - name: Merge upstream, bump patch, PR, CI, merge, tag, release
+      - name: Merge upstream, bump patch, open PR, and run CI
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -140,24 +137,9 @@ jobs:
             gh pr comment "$PR_NUM" --body "CI rouge sur la branche sync, PR laissee ouverte."
             exit 0
           fi
-          # Merge direct autorise : le check `build` du run dispatche porte
-          # sur le head SHA de la PR et satisfait la protection de branche.
-          gh pr merge "$PR_NUM" --squash --subject "Sync upstream v$NEW_VERSION"
-          echo "PR #$PR_NUM mergee (squash)."
-          git fetch origin master
-          git checkout -B tmp-release origin/master
-          V="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          echo "Version sur master : $V"
-          # Le tag est pousse pour archive ; son push par GITHUB_TOKEN ne
-          # declenchera PAS release.yml (anti-boucle), c'est le dispatch
-          # suivant qui s'en charge. Le tag remote est garde (pas de -d).
-          if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
-            echo "Tag v$V deja existant, pas de doublon."
-          else
-            git tag -a "v$V" -m "v$V"
-            git push origin "v$V"
-            echo "Tag v$V cree et pousse."
-          fi
-          gh workflow run release.yml --ref master -f tag="v$V"
-          echo "Resume : PR #$PR_NUM mergee, tag v$V pousse, release.yml dispatchee (tag=v$V)."
+          # Une CI verte ne constitue pas une revue de securite. Laisser la
+          # PR ouverte afin qu'un mainteneur aval approuve explicitement le
+          # contenu importe avant toute fusion, creation de tag ou release.
+          gh pr comment "$PR_NUM" --body "CI verte sur la branche sync. Revue et approbation explicites d'un mainteneur requises avant fusion ; ce workflow ne fusionnera ni ne publiera automatiquement ce contenu amont."
+          echo "PR #$PR_NUM laissee ouverte pour revue et approbation manuelles."
           exit 0
