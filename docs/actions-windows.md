@@ -44,8 +44,18 @@ What the action prints and how it ends:
   button and is removed from the message; an empty output shows "Done".
 - failure (non-zero exit): the last non-empty stderr line, else the last
   stdout line, else `exited with <status>`.
+- timeout: after 10 minutes, the action and its descendants are terminated,
+  including descendants holding stdout or stderr open after `cmd` exits.
+  The output readers finish before the timeout is reported.
 - when the action edited `transcript.md` or the `.meeting-recorder` file,
   the done page reads them again (same `fingerprint` check as Unix).
+
+Actions run inside a Windows Job Object. The shell starts suspended and is
+assigned to the job before it runs, so descendants are contained from their
+creation. Any remaining descendants are stopped when the action finishes;
+background processes should be launched separately from the action runner.
+Both output streams are drained concurrently, retaining at most their last
+1 MiB each.
 
 ## The meeting folder is NOT passed as an argument
 
