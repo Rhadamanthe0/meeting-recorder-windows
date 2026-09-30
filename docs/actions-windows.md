@@ -119,8 +119,16 @@ command = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Content
 Same run as the done page, printing the outcome. The MSI adds neither PATH
 nor App Paths, so use the installed full path:
 
-```text
-"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe" action "<name>" <meeting folder or .meeting-recorder file>
+In PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\MeetingRecorder\meeting-recorder-windows.exe" action "<name>" "<meeting folder or .meeting-recorder file>"
+```
+
+In cmd.exe:
+
+```bat
+"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe" action "<name>" "<meeting folder or .meeting-recorder file>"
 ```
 
 ## Differences vs Unix
