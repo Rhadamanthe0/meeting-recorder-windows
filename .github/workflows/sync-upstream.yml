@@ -34,7 +34,7 @@ jobs:
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/jankeesvw/omarchy-meeting-recorder.git
-          git fetch upstream master
+          git fetch upstream main
 
       - name: Merge upstream, bump patch, PR, CI, merge, tag, release
         env:
@@ -44,8 +44,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # Deja a jour : rien a faire, sans PR.
-          if git diff HEAD upstream/master --quiet; then
-            echo "Up to date with upstream/master, nothing to do."
+          if git diff HEAD upstream/main --quiet; then
+            echo "Up to date with upstream/main, nothing to do."
             exit 0
           fi
           BRANCH="sync/upstream-${GITHUB_RUN_ID}"
@@ -53,8 +53,8 @@ jobs:
           # master local reste propre, le merge vit sur la branche sync.
           git checkout -b "$BRANCH"
           HAVE_CONFLICT=false
-          if git merge upstream/master --no-edit; then
-            echo "Merge upstream/master sans conflit."
+          if git merge upstream/main --no-edit; then
+            echo "Merge upstream/main sans conflit."
           else
             if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
               HAVE_CONFLICT=true
@@ -73,7 +73,7 @@ jobs:
             git add -A
             git commit -m "Sync upstream (conflits, resolution manuelle requise)"
             git push -u origin "$BRANCH"
-            gh pr create --base master --head "$BRANCH" --title "Sync upstream" --body "$(printf 'Merge de upstream/master avec des conflits a resoudre a la main.\nLa PR ne pourra pas merger tant que les conflits ne sont pas resolus.\n\nFichiers en conflit :\n%s\n' "$CONFLICT_FILES")"
+            gh pr create --base master --head "$BRANCH" --title "Sync upstream" --body "$(printf 'Merge de upstream/main avec des conflits a resoudre a la main.\nLa PR ne pourra pas merger tant que les conflits ne sont pas resolus.\n\nFichiers en conflit :\n%s\n' "$CONFLICT_FILES")"
             PR_NUM="$(gh pr view "$BRANCH" --json number --jq .number)"
             gh pr comment "$PR_NUM" --body "$(printf 'Conflits a resoudre a la main :\n%s\n' "$CONFLICT_FILES")"
             echo "PR #$PR_NUM laisse ouverte (conflits), PAS d'auto-merge."
@@ -97,7 +97,7 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "Sync upstream v$NEW_VERSION"
           git push -u origin "$BRANCH"
-          gh pr create --base master --head "$BRANCH" --title "Sync upstream v$NEW_VERSION" --body "Synchronisation automatique de upstream/master (jankeesvw/omarchy-meeting-recorder). Merge sans conflit, bump patch v$VERSION vers v$NEW_VERSION."
+          gh pr create --base master --head "$BRANCH" --title "Sync upstream v$NEW_VERSION" --body "Synchronisation automatique de upstream/main (jankeesvw/omarchy-meeting-recorder). Merge sans conflit, bump patch v$VERSION vers v$NEW_VERSION."
           PR_NUM="$(gh pr view "$BRANCH" --json number --jq .number)"
           echo "PR #$PR_NUM creee."
           # Dispatch explicite de la CI : contourne l'anti-boucle (le push
