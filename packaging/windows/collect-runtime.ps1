@@ -11,8 +11,14 @@ param(
     [string]$TargetRelease = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "target\release"),
     # Runtime GTK4/libadwaita : $env:UCRT_BIN (CI) sinon C:\msys64\ucrt64\bin.
     [string]$UcrtBin = $env:UCRT_BIN,
-    # Build FFmpeg de secours si aucun ffmpeg local (URL stable Gyan).
-    [string]$FfmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    # Build FFmpeg pinné si aucun ffmpeg local : asset immuable GyanD/codexffmpeg 9.0.2.
+    # Hash source : api.github.com GyanD/codexffmpeg releases/tags/9.0.2 (vérifié le 2026-09-30),
+    # digest officiel de l'asset ffmpeg-9.0.2-essentials_build.zip. Bump via PR relue.
+    [string]$FfmpegZipUrl = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",
+    # SHA-256 attendu du ZIP (même source que ci-dessus).
+    [string]$FfmpegZipSha256 = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+    # Taille attendue du ZIP en octets (même source que ci-dessus).
+    [long]$FfmpegZipSize = 114768076
 )
 
 $ErrorActionPreference = "Stop"
@@ -225,36 +231,67 @@ function Find-LocalTool([string]$name) {
     if (Test-Path -LiteralPath $inUcrt) { $hits += $inUcrt }
     return $hits | Select-Object -Unique
 }
+# Mode CI strict : si $env:MR_FFMPEG_PINNED_ONLY -eq "1", ignore Find-LocalTool
+# (pas de copie depuis le PATH/TargetRelease) et télécharge toujours le ZIP pinné vérifié.
+# Comportement dev local (variable absente ou différente de "1") : repli PATH conservé,
+# mais le téléchargement reste le ZIP pinné vérifié.
+# Note : Authenticode n'est pas vérifié car l'amont GyanD ne signe pas ses binaires ;
+# le pin de hash SHA-256 + taille ci-dessous est le contrôle (bump via PR relue).
+# Le ZIP est téléchargé+vérifié+extrait UNE fois (mémorisé dans $ffmpegExtracted)
+# : la boucle ne fait plus que Copy-ToStage depuis l'arbre extrait.
+$ffmpegExtracted = $null
 foreach ($tool in @("ffmpeg.exe", "ffprobe.exe")) {
     if (Test-Path -LiteralPath (Join-Path $Stage $tool)) { continue }
-    $local = Find-LocalTool $tool | Select-Object -First 1
-    if ($local) {
-        Copy-ToStage $local $tool
+    if ($env:MR_FFMPEG_PINNED_ONLY -ne "1") {
+        $local = Find-LocalTool $tool | Select-Object -First 1
+        if ($local) {
+            Copy-ToStage $local $tool
+            continue
+        }
+    } else {
+        Write-Output "[stage] MR_FFMPEG_PINNED_ONLY=1 : $tool local ignoré, téléchargement du ZIP pinné vérifié."
+    }
+    # Secours : build GyanD FFmpeg essentials pinné (contient bin/ffmpeg.exe + bin/ffprobe.exe).
+    if ($ffmpegExtracted -and (Test-Path -LiteralPath (Join-Path $ffmpegExtracted $tool))) {
+        Copy-ToStage (Join-Path $ffmpegExtracted $tool) $tool
         continue
     }
-    # Secours : build Gyan FFmpeg essentials (zip stable, contient bin/ffmpeg.exe + bin/ffprobe.exe).
     Write-Output "[stage] $tool absent localement : téléchargement $FfmpegZipUrl ..."
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "meeting-recorder-ffmpeg"
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-    $zip = Join-Path $tmp "ffmpeg-release-essentials.zip"
+    $zip = Join-Path $tmp "ffmpeg-9.0.2-essentials_build.zip"
     try {
         Invoke-WebRequest -Uri $FfmpegZipUrl -OutFile $zip
     } catch {
-        Write-Error "Téléchargement FFmpeg impossible ($FfmpegZipUrl) et $tool introuvable localement. Installez-le (winget install Gyan.FFmpeg) puis relancez. Détail : $($_.Exception.Message)"
+        Write-Error "Téléchargement FFmpeg impossible ($FfmpegZipUrl) et $tool introuvable localement. Détail : $($_.Exception.Message)"
     }
-    $unzipped = Join-Path $tmp "ffmpeg-release-essentials"
+    # Fail-closed AVANT Expand-Archive : taille + SHA-256, throw bloquant si différent.
+    $actualSize = (Get-Item -LiteralPath $zip).Length
+    if ($actualSize -ne $FfmpegZipSize) {
+        throw "ZIP FFmpeg rejeté : taille $actualSize o (attendu $FfmpegZipSize o). Supprimez le cache TEMP/meeting-recorder-ffmpeg et relancez."
+    }
+    $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $FfmpegZipSha256.ToLowerInvariant()) {
+        throw "ZIP FFmpeg rejeté : SHA-256 $actualHash (attendu $($FfmpegZipSha256.ToLowerInvariant())). Supprimez le cache TEMP/meeting-recorder-ffmpeg et relancez."
+    }
+    $unzipped = Join-Path $tmp "ffmpeg-9.0.2-essentials_build"
     if (Test-Path -LiteralPath $unzipped) { Remove-Item -LiteralPath $unzipped -Recurse -Force }
     Expand-Archive -LiteralPath $zip -DestinationPath $unzipped -Force
     $bin = Get-ChildItem -LiteralPath $unzipped -Filter $tool -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $bin) {
-        Write-Error "$tool absent de l'archive FFmpeg ($FfmpegZipUrl). Installez-le (winget install Gyan.FFmpeg) puis relancez."
+        Write-Error "$tool absent de l'archive FFmpeg ($FfmpegZipUrl)."
     }
+    $ffmpegExtracted = Split-Path $bin.FullName -Parent
     Copy-ToStage $bin.FullName $tool
 }
-# Preuve d'intégrité : le ffmpeg embarqué doit démarrer et afficher sa version.
+# Smoke test APRÈS extraction du ZIP vérifié (ordre : download → hash → extract → stage → smoke) :
+# le ffmpeg embarqué doit démarrer et afficher sa version.
 $ffVersion = (& (Join-Path $Stage "ffmpeg.exe") -version 2>$null | Select-Object -First 1)
 if (-not $ffVersion) { Write-Error "Le ffmpeg du stage ne démarre pas (binaire corrompu ?)." }
 Write-Output "[stage] ffmpeg : $ffVersion"
+$fpVersion = (& (Join-Path $Stage "ffprobe.exe") -version 2>$null | Select-Object -First 1)
+if (-not $fpVersion) { Write-Error "Le ffprobe du stage ne démarre pas (binaire corrompu ?)." }
+Write-Output "[stage] ffprobe : $fpVersion"
 
 # --- 6b. Seconde passe : binaires arrivés après la BFS principale ---
 # ffmpeg/ffprobe (et toute DLL copiée sous stage/ après coup) doivent voir
