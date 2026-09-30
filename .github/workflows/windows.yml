@@ -153,7 +153,7 @@ jobs:
 
       # Guard C (bloquant) : `gio::launch_default_for_uri` échoue
       # silencieusement sur Windows ; tout le code doit passer par
-      # `platform::open_uri` (cmd /C start silencieux). Seule occurrence
+      # `platform::open_uri` (ShellExecuteW). Seule occurrence
       # légitime = la branche Unix de `open_uri` dans src/platform.rs.
       - name: Guard open_uri (pas de launch_default_for_uri direct)
         run: |
