@@ -94,14 +94,25 @@ mod windows {
             }
         }
 
-        pub fn terminate(&self) {
-            unsafe { TerminateJobObject(self.0, 1) };
+        pub fn terminate(&mut self) {
+            if self.0.is_null() {
+                return;
+            }
+            // Fermer le dernier handle avant les attentes et les join, même
+            // si TerminateJobObject échoue : KILL_ON_JOB_CLOSE arrête l'arbre.
+            let handle = std::mem::replace(&mut self.0, std::ptr::null_mut());
+            unsafe {
+                TerminateJobObject(handle, 1);
+                CloseHandle(handle);
+            }
         }
     }
 
     impl Drop for Job {
         fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
+            if !self.0.is_null() {
+                unsafe { CloseHandle(self.0) };
+            }
         }
     }
 
@@ -163,5 +174,62 @@ mod windows {
         }
         resume(process.child.id())?;
         Ok(process)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::Foundation::{DuplicateHandle, ERROR_ACCESS_DENIED};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        #[test]
+        fn job_close_reaps_descendants_when_terminate_is_denied() {
+            let mut command = crate::platform::silent_command("cmd");
+            command
+                .args(["/C", "ping -n 30 127.0.0.1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut process = ActionProcess::spawn(&mut command).unwrap();
+            let mut stdout = BufReader::new(process.child.stdout.take().unwrap());
+            let stderr = process.child.stderr.take().unwrap();
+            // La première ligne atteste que ping, descendant du shell, a
+            // démarré et conserve les handles des deux flux.
+            assert!(stdout.read_line(&mut String::new()).unwrap() > 0);
+            let stdout_reader = std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).unwrap();
+            });
+            let stderr_reader = std::thread::spawn(move || {
+                let mut stderr = stderr;
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).unwrap();
+            });
+            unsafe {
+                let current = GetCurrentProcess();
+                let mut restricted = std::ptr::null_mut();
+                // Dupliquer sans droits, puis fermer l'ancien handle : le
+                // vrai appel Win32 échoue désormais avec ACCESS_DENIED.
+                assert_ne!(
+                    DuplicateHandle(current, process.job.0, current, &mut restricted, 0, 0, 0),
+                    0
+                );
+                let previous = std::mem::replace(&mut process.job.0, restricted);
+                assert_ne!(CloseHandle(previous), 0);
+                assert_eq!(TerminateJobObject(process.job.0, 1), 0);
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(ERROR_ACCESS_DENIED as i32)
+                );
+            }
+            let started = Instant::now();
+            process.terminate();
+            assert!(process.job.0.is_null());
+            stdout_reader.join().unwrap();
+            stderr_reader.join().unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
     }
 }
