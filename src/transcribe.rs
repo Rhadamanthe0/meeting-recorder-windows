@@ -745,9 +745,18 @@ pub fn transcribe_single(
         return Ok(empty());
     }
     // Speakers first, so the live lines can already say who is talking.
+    // A missing speaker model is no reason to fail the transcript (same
+    // fallback as `voices` for recordings); the file then stays one speaker.
     let turns = match speakers {
         Some(1) => crate::diarize::single(track),
-        _ => crate::diarize::turns(track, speakers, events, abort)?,
+        _ => match crate::diarize::turns(track, speakers, events, abort) {
+            Ok(turns) => turns,
+            Err(e) if e == CANCELLED => return Err(e),
+            Err(e) => {
+                eprintln!("{}: telling voices apart: {e}", crate::APP_NAME);
+                crate::diarize::single(track)
+            }
+        },
     };
     let speakers = Speakers::Turns(turns);
     whisper_pass(
