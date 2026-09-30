@@ -1641,12 +1641,7 @@ impl Recorder {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(ipc::now, |d| d.as_secs() as i64);
-        let mut out = output_dir(started_at, &title);
-        let mut n = 2;
-        while out.exists() {
-            out = output_dir(started_at, &format!("{title} {n}"));
-            n += 1;
-        }
+        let out = free_output_dir(started_at, &title, |p| p.exists());
 
         self.player.unload();
         self.title_row.set_text(&title);
@@ -1675,9 +1670,7 @@ impl Recorder {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (source, target) = (path.clone(), out.clone());
-            let staging = crate::platform::cache_dir()
-                .join(APP_NAME)
-                .join(format!("import-{}", ipc::now()));
+            let staging = import_staging_dir();
             let converted = gio::spawn_blocking(move || import_audio(&source, &target, &staging))
                 .await
                 .unwrap_or_else(|_| Err("the import stopped unexpectedly".into()));
@@ -1963,7 +1956,7 @@ impl Recorder {
 
         let format = self.selected_format();
         let language = self.selected_language();
-        let out = output_dir(self.started_at.get(), &self.title());
+        let out = free_output_dir(self.started_at.get(), &self.title(), |p| p.exists());
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (audio_out, audio_staging) = (out.clone(), staging.clone());
@@ -3133,6 +3126,7 @@ impl Recorder {
                 return;
             }
             *self.result_dir.borrow_mut() = Some(target.clone());
+            self.player.load(&target);
             self.render();
         }
         // The folder the meeting is in now: renamed, or the numbered one it had.
@@ -3243,6 +3237,19 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
         .map(|s| s.to_string())
         .unwrap_or_default();
     platform::meetings_dir().join(format!("{stamp} {}", safe_name(title)))
+}
+
+/// First free meeting folder for `title`: `output_dir`, or with ` 2`, ` 3`, …
+/// while the folder exists. Two recordings started in the same minute share
+/// the same stamp, so saving without this overwrites the first one.
+fn free_output_dir(started_at: i64, title: &str, exists: impl Fn(&PathBuf) -> bool) -> PathBuf {
+    let mut out = output_dir(started_at, title);
+    let mut n = 2;
+    while exists(&out) {
+        out = output_dir(started_at, &format!("{title} {n}"));
+        n += 1;
+    }
+    out
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -3444,6 +3451,21 @@ fn redraw(widget: &impl IsA<gtk::Widget>) {
     }
 }
 
+/// Staging folder for an import, unique even for two imports in the same
+/// instant: wall-clock nanos plus a per-process counter (`ipc::now` only has
+/// one-second resolution, so two imports in the same second collided).
+fn import_staging_dir() -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    crate::platform::cache_dir()
+        .join(APP_NAME)
+        .join(format!("import-{nanos}-{seq}"))
+}
+
 /// Decodes any audio or video file with ffmpeg into the meeting folder: the
 /// levelled `audio.ogg` to listen to and `.tracks/source.ogg` to transcribe
 /// again. Returns the duration in seconds.
@@ -3537,6 +3559,12 @@ fn unfinished_recordings() -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
+        // Import staging (`import-*`, with mic.raw once decoded) is not a
+        // crashed recording: recovery must not propose it.
+        .filter(|dir| {
+            !dir.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("import-"))
+        })
         // Either track counts: a machine without a microphone still records
         // the computer audio.
         .filter(|dir| raw_duration(dir) > 0)
@@ -3809,5 +3837,18 @@ mod tests {
         assert_eq!(safe_name("com10"), "com10");
         assert_eq!(safe_name("Meeting: notes"), "Meeting- notes");
         assert_eq!(safe_name("  "), "Meeting");
+    }
+
+    #[test]
+    fn recording_folders_get_a_number_when_taken() {
+        let started_at = 1788000000;
+        let free = free_output_dir(started_at, "Weekly", |_| false);
+        assert_eq!(free, output_dir(started_at, "Weekly"));
+        let taken = output_dir(started_at, "Weekly");
+        let second = free_output_dir(started_at, "Weekly", |p| *p == taken);
+        assert_eq!(second, output_dir(started_at, "Weekly 2"));
+        let second_taken = output_dir(started_at, "Weekly 2");
+        let third = free_output_dir(started_at, "Weekly", |p| *p == taken || *p == second_taken);
+        assert_eq!(third, output_dir(started_at, "Weekly 3"));
     }
 }

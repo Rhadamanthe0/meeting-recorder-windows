@@ -211,7 +211,12 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .find(|p| p.extension().is_some_and(|e| e == EXTENSION) && p.is_file())
+        .find(|p| {
+            p.extension().is_some_and(|e| {
+                e.as_encoded_bytes()
+                    .eq_ignore_ascii_case(EXTENSION.as_bytes())
+            }) && p.is_file()
+        })
 }
 
 /// Writes the manifest into `dir`, replacing one with another name (after a rename).
