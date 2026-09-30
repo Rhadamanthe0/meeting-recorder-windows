@@ -157,12 +157,14 @@ pub fn open_uri(uri: &str) -> std::io::Result<()> {
 
 /// Quote une URI pour `cmd /C start "" <uri>`.
 ///
-/// `cmd` réinterprète la ligne même à l'intérieur des guillemets pour `%var%`
-/// (expansion d'environnement), donc `%` est doublé ; `&`/`|`/`^`/`<`/`>`
-/// sont littéraux entre guillemets. `"` ne peut pas survivre intact dans une
+/// `%` est laissé tel quel : à `/C` (contrairement à un fichier batch)
+/// `%%` n'est PAS replié en `%`, donc doubler `%` corrompt les URI
+/// encodées (`%20`, `%2F`, …) ; revers assumé : `%var%` peut être
+/// étendu par `cmd`.
+/// `&`/`|`/`^`/`<`/`>` sont littéraux entre guillemets. `"` ne peut pas survivre intact dans une
 /// URI entre guillemets `cmd`, il est retiré pour ne pas en sortir.
 fn quote_for_cmd(uri: &str) -> String {
-    format!("\"{}\"", uri.replace('"', "").replace('%', "%%"))
+    format!("\"{}\"", uri.replace('"', ""))
 }
 
 /// Construit un `Command` qui reste invisible sur Windows.
@@ -202,10 +204,12 @@ mod tests {
             quote_for_cmd("obsidian://open?vault=V&file=F"),
             "\"obsidian://open?vault=V&file=F\""
         );
-        // …`%var%` ne doit pas être étendu par `cmd`…
+        // …`%20` doit survivre tel quel : à `/C` (contrairement à un
+        // batch) `%%` n'est PAS replié — `cmd /C echo "a%%20b"` affiche
+        // `a%%20b` — donc doubler `%` corrompt les URI encodées…
         assert_eq!(
-            quote_for_cmd("https://x/%USER%/y"),
-            "\"https://x/%%USER%%/y\""
+            quote_for_cmd("obsidian://open?file=a%20b"),
+            "\"obsidian://open?file=a%20b\""
         );
         // …et `"` ne doit pas permettre de sortir des guillemets.
         assert_eq!(quote_for_cmd("https://x/a\"|b"), "\"https://x/a|b\"");

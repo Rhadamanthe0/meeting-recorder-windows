@@ -1641,7 +1641,9 @@ impl Recorder {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(ipc::now, |d| d.as_secs() as i64);
-        let out = free_output_dir(started_at, &title, |p| p.exists());
+        // Reserved atomically: two imports at once never share a folder.
+        let _ = std::fs::create_dir_all(platform::meetings_dir());
+        let out = free_output_dir(started_at, &title, |p| std::fs::create_dir(p));
 
         self.player.unload();
         self.title_row.set_text(&title);
@@ -1956,7 +1958,11 @@ impl Recorder {
 
         let format = self.selected_format();
         let language = self.selected_language();
-        let out = free_output_dir(self.started_at.get(), &self.title(), |p| p.exists());
+        // Reserved atomically: two windows stopping at once never share a folder.
+        let _ = std::fs::create_dir_all(platform::meetings_dir());
+        let out = free_output_dir(self.started_at.get(), &self.title(), |p| {
+            std::fs::create_dir(p)
+        });
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (audio_out, audio_staging) = (out.clone(), staging.clone());
@@ -2533,6 +2539,9 @@ impl Recorder {
         let lines = self.lines.borrow().clone();
         self.generating.set(true);
         self.update_chapters_header(!self.chapter_starts.borrow().is_empty());
+        // Identity of this meeting, in memory: two meetings started in the
+        // same minute share the folder prefix, but not `started_at`.
+        let gen_started = self.started_at.get();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let asked = agent.clone();
@@ -2551,14 +2560,12 @@ impl Recorder {
             .unwrap_or_else(|_| Err("the agent stopped unexpectedly".into()));
             this.generating.set(false);
             // The folder may have been renamed meanwhile (same timestamp
-            // prefix); a different meeting is left alone.
-            let prefix = |p: &std::path::Path| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.chars().take(12).collect::<String>())
-            };
+            // prefix, same `started_at`); a different meeting — even one
+            // started in the same minute — is left alone.
             let current = this.result_dir.borrow().clone();
-            let Some(dir) = current.filter(|d| prefix(d) == prefix(&dir)) else {
+            let Some(dir) = current.filter(|d| {
+                Recorder::chapters_still_current(&dir, gen_started, d, this.started_at.get())
+            }) else {
                 return;
             };
             match result {
@@ -2571,6 +2578,27 @@ impl Recorder {
                 }
             }
         });
+    }
+
+    /// Whether chapters generated for `captured` still belong in `current`.
+    ///
+    /// The folder may have been renamed meanwhile, so the paths are only
+    /// compared on their 12-char timestamp prefix; `started_at` (full seconds,
+    /// already in memory, no GTK blocking) tells two meetings started in the
+    /// same minute apart. Without it, opening meeting B while A's chapters
+    /// generate would pass the prefix check and write A's chapters into B.
+    fn chapters_still_current(
+        captured: &std::path::Path,
+        captured_started: i64,
+        current: &std::path::Path,
+        current_started: i64,
+    ) -> bool {
+        let prefix = |p: &std::path::Path| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.chars().take(12).collect::<String>())
+        };
+        prefix(captured) == prefix(current) && captured_started == current_started
     }
 
     fn store_chapters(self: &Rc<Self>, dir: &std::path::Path, list: &[Chapter], agent: &Agent) {
@@ -3239,17 +3267,31 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
     platform::meetings_dir().join(format!("{stamp} {}", safe_name(title)))
 }
 
-/// First free meeting folder for `title`: `output_dir`, or with ` 2`, ` 3`, …
-/// while the folder exists. Two recordings started in the same minute share
-/// the same stamp, so saving without this overwrites the first one.
-fn free_output_dir(started_at: i64, title: &str, exists: impl Fn(&PathBuf) -> bool) -> PathBuf {
-    let mut out = output_dir(started_at, title);
-    let mut n = 2;
-    while exists(&out) {
-        out = output_dir(started_at, &format!("{title} {n}"));
-        n += 1;
+/// First free meeting folder for `title`, reserved atomically: `output_dir`,
+/// or with ` 2`, ` 3`, … Two recordings started in the same minute share
+/// the same stamp, so saving without this overwrites the first one; and two
+/// windows saving at once would pick the same suffix with a mere `exists`
+/// check (TOCTOU). `claim` creates the folder (e.g. `std::fs::create_dir`):
+/// the first `Ok` keeps the name, `AlreadyExists` tries the next suffix. Any
+/// other error returns the candidate as-is and lets the caller surface it.
+fn free_output_dir(
+    started_at: i64,
+    title: &str,
+    claim: impl Fn(&PathBuf) -> std::io::Result<()>,
+) -> PathBuf {
+    let mut n = 1;
+    loop {
+        let out = if n == 1 {
+            output_dir(started_at, title)
+        } else {
+            output_dir(started_at, &format!("{title} {n}"))
+        };
+        match claim(&out) {
+            Ok(()) => return out,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(_) => return out,
+        }
     }
-    out
 }
 
 fn row_count(list: &gtk::ListBox) -> i32 {
@@ -3840,15 +3882,73 @@ mod tests {
     }
 
     #[test]
+    fn chapters_go_to_a_renamed_folder_but_not_to_another_meeting() {
+        use std::path::Path;
+        let meeting = Path::new("/Meetings/202609241400 Weekly");
+        let renamed = Path::new("/Meetings/202609241400 New title");
+        let same_minute = Path::new("/Meetings/202609241400 Other");
+        // Untouched meeting: keep.
+        assert!(Recorder::chapters_still_current(
+            meeting, 1000, meeting, 1000
+        ));
+        // Renamed meanwhile: same prefix, same `started_at` → keep.
+        assert!(Recorder::chapters_still_current(
+            meeting, 1000, renamed, 1000
+        ));
+        // Another meeting started in the same minute: same prefix but a
+        // different `started_at` → leave alone.
+        assert!(!Recorder::chapters_still_current(
+            meeting,
+            1000,
+            same_minute,
+            1061
+        ));
+    }
+
+    #[test]
     fn recording_folders_get_a_number_when_taken() {
+        use std::io::{Error, ErrorKind};
+        let taken = || Error::new(ErrorKind::AlreadyExists, "taken");
         let started_at = 1788000000;
-        let free = free_output_dir(started_at, "Weekly", |_| false);
+        let free = free_output_dir(started_at, "Weekly", |_| Ok(()));
         assert_eq!(free, output_dir(started_at, "Weekly"));
-        let taken = output_dir(started_at, "Weekly");
-        let second = free_output_dir(started_at, "Weekly", |p| *p == taken);
+        let taken_dir = output_dir(started_at, "Weekly");
+        let second = free_output_dir(started_at, "Weekly", |p| {
+            if *p == taken_dir {
+                Err(taken())
+            } else {
+                Ok(())
+            }
+        });
         assert_eq!(second, output_dir(started_at, "Weekly 2"));
         let second_taken = output_dir(started_at, "Weekly 2");
-        let third = free_output_dir(started_at, "Weekly", |p| *p == taken || *p == second_taken);
+        let third = free_output_dir(started_at, "Weekly", |p| {
+            if *p == taken_dir || *p == second_taken {
+                Err(taken())
+            } else {
+                Ok(())
+            }
+        });
         assert_eq!(third, output_dir(started_at, "Weekly 3"));
+    }
+
+    #[test]
+    fn recording_folder_claim_retries_then_keeps() {
+        use std::cell::RefCell;
+        use std::io::{Error, ErrorKind};
+        let started_at = 1788000000;
+        let first = output_dir(started_at, "Weekly");
+        let claimed = RefCell::new(Vec::new());
+        let out = free_output_dir(started_at, "Weekly", |p| {
+            claimed.borrow_mut().push(p.clone());
+            if *p == first {
+                Err(Error::new(ErrorKind::AlreadyExists, "taken"))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(out, output_dir(started_at, "Weekly 2"));
+        // The taken name was attempted, then the kept one was claimed.
+        assert_eq!(*claimed.borrow(), vec![first, out]);
     }
 }
