@@ -27,6 +27,17 @@ use gtk::glib;
 pub const APP_ID: &str = "com.jankeesvw.OmarchyMeetingRecorder";
 pub const APP_NAME: &str = "omarchy-meeting-recorder";
 
+/// Whether `arg` opens a meeting: a `.meeting-recorder` file or a meeting
+/// folder. The extension matches case-insensitively: the Windows shell
+/// association is not case-sensitive, so `Weekly.MEETING-RECORDER` must open
+/// instead of falling into unknown-command.
+fn is_meeting_path(arg: &str) -> bool {
+    std::path::Path::new(arg)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(meeting::EXTENSION))
+        || std::path::Path::new(arg).is_dir()
+}
+
 // Rattache la console du processus parent (terminal/pipes CLI) quand elle
 // existe. Double-clic GUI : aucune console créée (windows_subsystem).
 // Erreurs ignorées silencieusement : pas de log, pas de panic.
@@ -101,15 +112,29 @@ fn main() -> glib::ExitCode {
             );
             glib::ExitCode::SUCCESS
         }
-        Some(path)
-            if path.ends_with(&format!(".{}", meeting::EXTENSION))
-                || std::path::Path::new(path).is_dir() =>
-        {
-            ui::run(Some(path))
-        }
+        Some(path) if is_meeting_path(path) => ui::run(Some(path)),
         Some(other) => {
             eprintln!("{APP_NAME}: unknown command '{other}', see --help");
             glib::ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_meeting_path;
+
+    #[test]
+    fn meeting_file_matches_case_insensitively() {
+        assert!(is_meeting_path("Weekly.meeting-recorder"));
+        assert!(is_meeting_path("Weekly.MEETING-RECORDER"));
+        assert!(is_meeting_path("Weekly.Meeting-Recorder"));
+        assert!(!is_meeting_path("Weekly.txt"));
+        assert!(!is_meeting_path("start"));
+    }
+
+    #[test]
+    fn meeting_folder_still_opens() {
+        assert!(is_meeting_path(&std::env::temp_dir().to_string_lossy()));
     }
 }

@@ -106,10 +106,11 @@ command = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Content
 
 ## Trying an action from a terminal
 
-Same run as the done page, printing the outcome:
+Same run as the done page, printing the outcome. The MSI adds neither PATH
+nor App Paths, so use the installed full path:
 
 ```text
-meeting-recorder-windows action "<name>" <meeting folder or .meeting-recorder file>
+"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe" action "<name>" <meeting folder or .meeting-recorder file>
 ```
 
 ## Differences vs Unix
@@ -120,7 +121,7 @@ meeting-recorder-windows action "<name>" <meeting folder or .meeting-recorder fi
   never a positional argument.
 - config file: `%APPDATA%\omarchy-meeting-recorder\config.toml`
   vs `~/.config/omarchy-meeting-recorder/config.toml`.
-- helper binary: `meeting-recorder-windows[.exe]` vs `omarchy-meeting-recorder`.
+- helper binary: `"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe"` vs `omarchy-meeting-recorder`.
 - the "Add actions…" button on the done page opens this page
   (`actions::DOCS` on Windows, via `platform::open_uri` → `cmd /C start`);
   on Unix it opens the upstream `docs/actions.md`.
@@ -132,6 +133,6 @@ calls the `omarchy-meeting-recorder ask` binary, `OBSIDIAN_VAULT=~/...`)
 and `examples/actions/publish-transcript` (`bash`, calls
 `omarchy-meeting-recorder ask`, plus `gh`, `mktemp`, `sed`, `tail`)
 assume a Unix setup and the Unix binary name: they do not run as-is on
-Windows. Adapt them (Python via `py`, GitHub CLI for Windows, binary
-`meeting-recorder-windows`) instead of running them directly.
+Windows. Adapt them (Python via `py`, GitHub CLI for Windows, installed exe
+`"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe"`) instead of running them directly.
 They are intentionally left untouched.
