@@ -2563,9 +2563,9 @@ impl Recorder {
             // prefix, same `started_at`); a different meeting — even one
             // started in the same minute — is left alone.
             let current = this.result_dir.borrow().clone();
-            let Some(dir) = current
-                .filter(|d| Recorder::chapters_still_current(&dir, gen_started, d, this.started_at.get()))
-            else {
+            let Some(dir) = current.filter(|d| {
+                Recorder::chapters_still_current(&dir, gen_started, d, this.started_at.get())
+            }) else {
                 return;
             };
             match result {
