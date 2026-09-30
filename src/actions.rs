@@ -15,6 +15,8 @@
 //! Open button instead. An action may change the meeting itself: when it
 //! edited the transcript or the meeting file, the done page reads them again.
 
+use std::collections::VecDeque;
+use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -118,6 +120,33 @@ pub struct Outcome {
 /// long time (they can call out to scripts and services), so this is roomy:
 /// only a truly hung action hits it.
 const ACTION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Enough output to preserve useful diagnostics without letting a noisy action
+/// consume memory without bound.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+fn drain_bounded(mut stream: impl Read) -> Vec<u8> {
+    let mut output = VecDeque::with_capacity(MAX_OUTPUT_BYTES);
+    let mut chunk = [0; 8192];
+    while let Ok(size) = stream.read(&mut chunk) {
+        if size == 0 {
+            break;
+        }
+        if size >= MAX_OUTPUT_BYTES {
+            output.clear();
+            output.extend(&chunk[size - MAX_OUTPUT_BYTES..size]);
+            continue;
+        }
+        let overflow = output
+            .len()
+            .saturating_add(size)
+            .saturating_sub(MAX_OUTPUT_BYTES);
+        if overflow > 0 {
+            output.drain(..overflow);
+        }
+        output.extend(&chunk[..size]);
+    }
+    output.into_iter().collect()
+}
 
 /// Runs `action` on the meeting in `dir`. Blocking; the caller runs it off the
 /// main thread.
@@ -164,13 +193,19 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
-    // `output()` would wait without bound: a hanging action would leak this
-    // thread and leave the "running" toast on screen forever. Poll instead,
-    // like the agent runner does, and kill past the timeout.
+    // Drain both pipes while the action runs. Waiting for the child to exit
+    // before reading can deadlock when either finite pipe buffer fills.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = std::thread::spawn(move || drain_bounded(stdout));
+    let stderr_reader = std::thread::spawn(move || drain_bounded(stderr));
+
+    // Poll rather than waiting without bound, so a hanging action cannot leak
+    // this worker thread and leave the "running" toast on screen forever.
     let started = Instant::now();
-    let output = loop {
+    let status = loop {
         match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => break child.wait_with_output().map_err(|e| e.to_string())?,
+            Some(status) => break status,
             None if started.elapsed() >= ACTION_TIMEOUT => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -182,12 +217,18 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
             None => std::thread::sleep(Duration::from_millis(100)),
         }
     };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "could not read action stdout".to_owned())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "could not read action stderr".to_owned())?;
+    let stdout = String::from_utf8_lossy(&stdout);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         let why = last_line(&stderr)
             .or_else(|| last_line(&stdout))
-            .unwrap_or_else(|| format!("exited with {}", output.status));
+            .unwrap_or_else(|| format!("exited with {status}"));
         return Err(why);
     }
     let line = last_line(&stdout).unwrap_or_default();
@@ -367,6 +408,13 @@ name = "not an action"
         assert!(named.url.is_none());
         let failed = run(&action("echo nope >&2; exit 3"), &dir, &manifest);
         assert_eq!(failed.err().as_deref(), Some("nope"));
+        let noisy = run(
+            &action("(yes o | head -c 2097152); (yes e | head -c 2097152 >&2); echo Finished"),
+            &dir,
+            &manifest,
+        )
+        .unwrap();
+        assert_eq!(noisy.message, "Finished");
         std::fs::remove_dir_all(&dir).ok();
     }
 
