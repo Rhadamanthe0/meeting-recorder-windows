@@ -66,6 +66,29 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
     meeting_dir.join(export::TRACKS_DIR).join("source.ogg")
 }
 
+/// Copies the real meeting artefacts next to an imported manifest copy, so a
+/// meeting folder moved outside Meetings and reopened by its manifest still
+/// shows its transcript and audio. Explicit allowlist only (never `*`) :
+/// `transcript.md`, the playable `audio.ogg` / `mic.ogg` / `computer.ogg`,
+/// and the kept `.tracks/` files (`mic.ogg`, `computer.ogg`, `source.ogg`).
+/// Best-effort : a missing artefact (e.g. a lone `evil.meeting-recorder` in
+/// Downloads) is skipped, and the source folder is never written to.
+fn copy_imported_artefacts(src: &std::path::Path, out: &std::path::Path) {
+    for name in ["transcript.md", "audio.ogg", "mic.ogg", "computer.ogg"] {
+        let from = src.join(name);
+        if from.is_file() {
+            let _ = std::fs::copy(&from, out.join(name));
+        }
+    }
+    for name in ["mic.ogg", "computer.ogg", "source.ogg"] {
+        let from = src.join(export::TRACKS_DIR).join(name);
+        if from.is_file() {
+            let _ = std::fs::create_dir_all(out.join(export::TRACKS_DIR));
+            let _ = std::fs::copy(&from, out.join(export::TRACKS_DIR).join(name));
+        }
+    }
+}
+
 /// Choices in the import dialog: automatic, then a fixed number.
 const SPEAKER_CHOICES: [&str; 7] = ["Automatic", "1", "2", "3", "4", "5", "6"];
 
@@ -328,6 +351,8 @@ struct Recorder {
     segments: RefCell<Vec<(i32, i64)>>,
     /// The paragraphs on screen as (start ms, speaker, text), what the agent reads.
     lines: RefCell<Vec<(i64, String, String)>>,
+    /// The meeting `lines` was rendered for (`started_at` at `show_transcript` time).
+    lines_started: Cell<i64>,
     chapters_group: adw::PreferencesGroup,
     chapters_list: gtk::ListBox,
     /// Start of each row in the chapters list, in ms.
@@ -343,6 +368,9 @@ struct Recorder {
     /// A fresh transcript waiting for the probe: auto-generate chapters once
     /// the probe answers, if an agent is around. Consumed exactly once.
     pending_chapters: Cell<bool>,
+    /// The meeting the deferred auto-generation belongs to (`started_at` at
+    /// `finished` time). The probe callback only generates if it is still current.
+    pending_chapters_started: Cell<i64>,
     generating: Cell<bool>,
     current_line: Cell<i32>,
 
@@ -798,6 +826,7 @@ impl Recorder {
             player,
             segments: RefCell::default(),
             lines: RefCell::default(),
+            lines_started: Cell::new(0),
             chapters_group,
             chapters_list,
             chapter_starts: RefCell::default(),
@@ -807,6 +836,7 @@ impl Recorder {
             agent: std::cell::OnceCell::new(),
             agent_checking: Cell::new(false),
             pending_chapters: Cell::new(false),
+            pending_chapters_started: Cell::new(0),
             generating: Cell::new(false),
             current_line: Cell::new(-1),
             mic,
@@ -1647,6 +1677,11 @@ impl Recorder {
         let out = free_output_dir(started_at, &title, |p| std::fs::create_dir(p));
 
         self.player.unload();
+        // An import replaces the meeting: drop any deferred auto-generation
+        // and stale lines so a probe in flight cannot generate for the new one.
+        self.pending_chapters.set(false);
+        self.pending_chapters_started.set(0);
+        self.lines.borrow_mut().clear();
         self.title_row.set_text(&title);
         self.started_at.set(started_at);
         *self.result_dir.borrow_mut() = Some(out.clone());
@@ -2225,6 +2260,7 @@ impl Recorder {
                 self.generate_chapters();
             } else if self.agent_checking.get() {
                 self.pending_chapters.set(true);
+                self.pending_chapters_started.set(self.started_at.get());
             }
         }
         if self.quit_when_done.get()
@@ -2271,12 +2307,34 @@ impl Recorder {
             self.toast("Finish the current recording first");
             return;
         }
-        let Some((dir, manifest)) = meeting::open(path) else {
+        let opened_file = !path.is_dir();
+        let Some((mut dir, manifest)) = meeting::open(path) else {
             self.toast("This is not a meeting the recorder can open");
             return;
         };
-        // Folders from before manifests existed get one now.
-        if meeting::find(&dir).is_none() {
+        // A standalone manifest opened from outside the meetings folder (e.g.
+        // Downloads) must never make its parent the result dir: import a copy
+        // into a dedicated folder instead, leaving the source folder intact.
+        if opened_file && !is_owned_meeting_dir(&dir) {
+            if std::fs::create_dir_all(platform::meetings_dir()).is_err() {
+                self.toast("Could not import this meeting into Meetings");
+                return;
+            }
+            let out = free_output_dir(manifest.started_at, &manifest.title, |p| {
+                std::fs::create_dir(p)
+            });
+            if meeting::write(&out, &manifest).is_err() {
+                self.toast("Could not import this meeting into Meetings");
+                return;
+            }
+            copy_imported_artefacts(&dir, &out);
+            dir = out;
+        }
+        // Folders from before manifests existed get one now. Only inside the
+        // meetings folder: never write into an unowned parent. (After an
+        // import-copy above, `find(&out)` sees the manifest just written, so
+        // this is skipped naturally.)
+        if meeting::find(&dir).is_none() && is_owned_meeting_dir(&dir) {
             let _ = meeting::write(&dir, &manifest);
         }
 
@@ -2415,6 +2473,7 @@ impl Recorder {
         }
         *self.segments.borrow_mut() = segments;
         *self.lines.borrow_mut() = lines;
+        self.lines_started.set(self.started_at.get());
         self.player.set_chapters(
             chapters
                 .iter()
@@ -2456,7 +2515,11 @@ impl Recorder {
             // auto-generation now that the agent is known. Consumed once; the
             // `generating` guard keeps a manual Generate from doubling.
             let pending = this.pending_chapters.replace(false);
-            if pending && !this.generating.get() && this.can_have_chapters() {
+            if pending
+                && this.started_at.get() == this.pending_chapters_started.get()
+                && !this.generating.get()
+                && this.can_have_chapters()
+            {
                 this.generate_chapters();
             }
         });
@@ -2537,12 +2600,17 @@ impl Recorder {
         // A manual Generate consumes a deferred auto-generation: the probe
         // callback must not start a second one.
         self.pending_chapters.set(false);
-        let lines = self.lines.borrow().clone();
-        self.generating.set(true);
-        self.update_chapters_header(!self.chapter_starts.borrow().is_empty());
         // Identity of this meeting, in memory: two meetings started in the
         // same minute share the folder prefix, but not `started_at`.
         let gen_started = self.started_at.get();
+        // `lines` belongs to the meeting it was rendered for; an import
+        // meanwhile clears it, so a manual Generate must not run on stale lines.
+        if self.lines_started.get() != gen_started {
+            return;
+        }
+        let lines = self.lines.borrow().clone();
+        self.generating.set(true);
+        self.update_chapters_header(!self.chapter_starts.borrow().is_empty());
         let this = self.clone();
         glib::spawn_future_local(async move {
             let asked = agent.clone();
@@ -3140,6 +3208,13 @@ impl Recorder {
         let Some(current) = self.result_dir.borrow().clone() else {
             return;
         };
+        // Fail closed: only a managed meeting folder may be renamed. Without
+        // this, a result dir pointing outside Meetings (e.g. Downloads after
+        // opening a standalone manifest) would get renamed as a whole.
+        if !is_owned_meeting_dir(&current) {
+            self.toast("This folder is not a managed meeting folder; rename refused");
+            return;
+        }
         let title = self.title();
         let target = output_dir(self.started_at.get(), &title);
         // "202609241400 Weekly 2" is still the folder of "Weekly": an import
@@ -3245,6 +3320,47 @@ impl Recorder {
         });
         dialog.present(Some(&self.window));
     }
+}
+
+/// Canonical form of a dir for ownership checks: `canonicalize` when the path
+/// exists (UNC `\\?\` on Windows: both sides are canonicalized, so the
+/// comparison stays coherent), absolutized otherwise (e.g. a `meetings_dir`
+/// that does not exist yet).
+fn canonical_dir(p: &std::path::Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(p) {
+        return canonical;
+    }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    }
+}
+
+/// Whether `dir` is a meeting folder managed by the recorder: a direct child
+/// of `root`. The root itself is not owned. Pure over its two arguments so it
+/// stays unit-testable without touching the real meetings folder.
+fn is_owned_by(dir: &std::path::Path, root: &std::path::Path) -> bool {
+    let dir = canonical_dir(dir);
+    let root = canonical_dir(root);
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    if cfg!(windows) {
+        parent
+            .as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(root.as_os_str().as_encoded_bytes())
+    } else {
+        parent == root.as_path()
+    }
+}
+
+/// Whether `dir` sits directly inside the meetings folder.
+fn is_owned_meeting_dir(dir: &std::path::Path) -> bool {
+    is_owned_by(dir, &platform::meetings_dir())
 }
 
 /// Whether `folder` is `expected`, or `expected` with a number after it.
@@ -4005,5 +4121,30 @@ mod tests {
         assert_eq!(out, output_dir(started_at, "Weekly 2"));
         // The taken name was attempted, then the kept one was claimed.
         assert_eq!(*claimed.borrow(), vec![first, out]);
+    }
+
+    #[test]
+    fn only_direct_children_of_the_meetings_root_are_owned() {
+        // Temporary paths only: never the real meetings folder, and nothing
+        // is created (missing paths exercise the absolutize fallback).
+        let base = std::env::temp_dir().join("meeting-recorder-owned-check");
+        let root = base.join("Meetings");
+        // Normal and numbered meeting folders are owned.
+        assert!(is_owned_by(&root.join("202609241400 Weekly"), &root));
+        assert!(is_owned_by(&root.join("202609241400 Weekly 2"), &root));
+        // A standalone manifest's parent (e.g. Downloads) is not owned...
+        assert!(!is_owned_by(&base.join("Downloads"), &root));
+        // ...nor is the root itself, nor a folder nested deeper.
+        assert!(!is_owned_by(&root, &root));
+        assert!(!is_owned_by(
+            &root.join("sub").join("202609241400 Weekly"),
+            &root
+        ));
+    }
+
+    #[test]
+    fn canonical_dir_falls_back_to_an_absolute_path() {
+        let abs = canonical_dir(std::path::Path::new("some-meeting-folder"));
+        assert!(abs.is_absolute());
     }
 }

@@ -6,9 +6,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: read
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
@@ -16,7 +21,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
       # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
@@ -24,7 +29,7 @@ jobs:
       # libadwaita MinGW depuis MSVC) :
       #   toolchain: stable / targets: x86_64-pc-windows-msvc
       - name: Install Rust stable GNU
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
@@ -36,10 +41,10 @@ jobs:
         run: rustc -vV
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install GTK4 (MSYS2 UCRT64)
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
           update: true
@@ -51,19 +56,31 @@ jobs:
             mingw-w64-ucrt-x86_64-clang
 
       # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
-      - name: Install ffmpeg
+      # ZIP pinné vérifié (pas de winget live mutable) : même pin que
+      # packaging/windows/collect-runtime.ps1 (GyanD/codexffmpeg 9.0.2).
+      # Hash source : api.github.com GyanD/codexffmpeg releases/tags/9.0.2
+      # (vérifié le 2026-09-30), digest officiel de l'asset
+      # ffmpeg-9.0.2-essentials_build.zip. Bump via PR relue.
+      # Ordre : download → hash → extract → PATH → smoke (-version exécuté
+      # uniquement sur le binaire vérifié).
+      - name: Install ffmpeg (pinné 9.0.2 vérifié)
         run: |
-          winget install --exact --accept-source-agreements --accept-package-agreements Gyan.FFmpeg
-          $ff = $null
-          try { $ff = (Get-Command ffmpeg.exe -ErrorAction Stop).Source } catch {}
-          if (-not $ff) {
-            $pkg = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
-            if (Test-Path $pkg) { $ff = Get-ChildItem -Path $pkg -Filter "ffmpeg.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName } }
-          }
-          if (-not $ff -or -not (Test-Path $ff)) { throw "ffmpeg.exe introuvable après winget install Gyan.FFmpeg" }
+          $ffZip = Join-Path $env:RUNNER_TEMP "ffmpeg-9.0.2-essentials_build.zip"
+          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" -OutFile $ffZip
+          $expectedSize = 114768076
+          $actualSize = (Get-Item -LiteralPath $ffZip).Length
+          if ($actualSize -ne $expectedSize) { throw "Taille ZIP FFmpeg inattendue : $actualSize (attendu $expectedSize)" }
+          $expected = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
+          $actual = (Get-FileHash -LiteralPath $ffZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 FFmpeg inattendu : $actual (attendu $expected)" }
+          $ffDir = Join-Path $env:RUNNER_TEMP "ffmpeg-pinned"
+          if (Test-Path $ffDir) { Remove-Item $ffDir -Recurse -Force }
+          Expand-Archive -LiteralPath $ffZip -DestinationPath $ffDir -Force
+          $ff = Get-ChildItem -Path $ffDir -Filter "ffmpeg.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName }
+          if (-not $ff -or -not (Test-Path $ff)) { throw "ffmpeg.exe absent de l'archive FFmpeg pinnée" }
           Split-Path $ff -Parent >> $env:GITHUB_PATH
           & $ff -version | Select-Object -First 2
-          Write-Output "[ci] ffmpeg=$ff"
+          Write-Output "[ci] ffmpeg pinné=$ff"
 
       # Expose pkg-config + gcc UCRT64 au build cargo (hôte GNU par défaut).
       - name: Expose GTK au build GNU
@@ -99,11 +116,16 @@ jobs:
           Write-Output "[ci] pkgconf=$p"
 
       # ORT dynamique : binaires Microsoft 1.28 pour ort-sys GNU (sans précompilés GNU).
+      # Hash source : api.github.com repos/microsoft/onnxruntime releases/tags/v1.28.0,
+      # champ digest de l'asset onnxruntime-win-x64-1.28.0.zip (size 78796801).
       - name: ORT dynamique Microsoft 1.28
         run: |
           $ortZip = Join-Path $env:RUNNER_TEMP "ort.zip"
           $ortDir = Join-Path $env:RUNNER_TEMP "ort"
           Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip" -OutFile $ortZip
+          $expected = "abef733dacbe2f571547a7150b479b5cb9cc0df22f96c24983a42cadb1b4f8bc"
+          $actual = (Get-FileHash -LiteralPath $ortZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 ORT inattendu : $actual (attendu $expected)" }
           Expand-Archive -LiteralPath $ortZip -DestinationPath $ortDir -Force
           $ortRoot = Join-Path $ortDir "onnxruntime-win-x64-1.28.0"
           $ortLib = Join-Path $ortRoot "lib"
@@ -114,11 +136,10 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
-      # Régénère le lock en CI : le Cargo.lock amont (Linux) ne contient pas
-      # les deps Windows, cargo doit pouvoir le mettre à jour (accès réseau).
-      - name: Generate lockfile
-        run: cargo generate-lockfile
-
+      # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
+      # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked
+      # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
+      # à jour par PR relue, pas en CI.
       # Guard A (bloquant) : tout spawn Windows doit passer par
       # `platform::silent_command` (CREATE_NO_WINDOW), sinon flash de console.
       # Seule source légitime de `Command::new` = src/platform.rs.
@@ -170,19 +191,19 @@ jobs:
       - name: Format rustfmt (bloquant)
         run: cargo fmt --all -- --check
 
-      # Contrôle sur le lock régénéré ci-dessus.
+      # Contrôle sur le lock commité.
       - name: Check
-        run: cargo check
+        run: cargo check --locked
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
       # Clippy informatif (NON BLOQUANT, continue-on-error) : relève les
       # warnings sans gater tant que le socle n'est pas clean ; gating futur
       # envisagé une fois le bruit résorbé.
       - name: Clippy (informatif, non bloquant)
         continue-on-error: true
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
       - name: Diagnostic libs statiques
@@ -194,7 +215,7 @@ jobs:
           Get-ChildItem -Path "target" -Include *.a,*.lib -Recurse -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Output ("[ci] lib: " + $_.FullName + " (" + $_.Length + " o)") }
 
       - name: Build release (Vulkan OFF by default)
-        run: cargo build --release
+        run: cargo build --release --locked
 
       # Guard subsystem GUI (bloquant) : l'exe doit être `Windows GUI` sinon
       # Windows ouvre une console au double-clic. Double preuve : header PE
@@ -211,23 +232,19 @@ jobs:
           if (-not ($hdr | Where-Object { $_ -match 'Subsystem\s+.*Windows GUI' })) { throw "subsystem PE inattendu (pas Windows GUI) : l'exe ouvrirait une console au double-clic" }
           Write-Output "[ci] guard subsystem GUI OK"
 
-      # Remplace les symlinks copy-dylibs par de vrais fichiers DLL (symlink-safe).
+      # Allowlist ORT vers target/release : onnxruntime.dll + providers
+      # uniquement (jamais de *.dll aveugle). Remplace aussi les symlinks
+      # copy-dylibs par de vrais fichiers (symlink-safe).
       - name: Copie DLL ORT vers target/release
         run: |
-          Get-ChildItem (Join-Path $env:ORT_LIB_LOCATION "*.dll") | ForEach-Object {
-            $dest = Join-Path "target/release/" $_.Name
-            if (Test-Path $dest) { Remove-Item $dest -Force }
-            Copy-Item $_.FullName $dest -Force
+          foreach ($pat in @("onnxruntime.dll", "onnxruntime_providers_*.dll")) {
+            Get-ChildItem (Join-Path $env:ORT_LIB_LOCATION $pat) -ErrorAction SilentlyContinue | ForEach-Object {
+              $dest = Join-Path "target/release/" $_.Name
+              if (Test-Path $dest) { Remove-Item $dest -Force }
+              Copy-Item $_.FullName $dest -Force
+            }
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
-
-      # Lock régénéré à récupérer pour le committer ensuite.
-      - name: Upload Cargo.lock régénéré
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock
-          if-no-files-found: warn
-          path: Cargo.lock
 
       # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
       # seulement si candle est absent.
@@ -385,14 +402,14 @@ jobs:
 
       - name: Upload msi-stage (diagnostic closure)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: msi-stage
           if-no-files-found: warn
           path: packaging/windows/stage/
 
       - name: Upload MSI Windows x86_64
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-msi
           if-no-files-found: error

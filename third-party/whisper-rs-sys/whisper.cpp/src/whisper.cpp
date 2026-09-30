@@ -1879,11 +1879,30 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
                 break;
             }
 
+            if (n_dims < 1 || n_dims > 4) {
+                WHISPER_LOG_ERROR("%s: wrong number of dimensions %d in model file\n", __func__, n_dims);
+                return false;
+            }
+
+            if (length < 0 || length > 1024) {
+                WHISPER_LOG_ERROR("%s: invalid tensor name length %d in model file\n", __func__, length);
+                return false;
+            }
+
             int32_t nelements = 1;
             int32_t ne[4] = { 1, 1, 1, 1 };
             for (int i = 0; i < n_dims; ++i) {
                 read_safe(loader, ne[i]);
-                nelements *= ne[i];
+                if (ne[i] <= 0) {
+                    WHISPER_LOG_ERROR("%s: invalid dimension %d size %d in model file\n", __func__, i, ne[i]);
+                    return false;
+                }
+                int64_t tmp = (int64_t) nelements * ne[i];
+                if (tmp <= 0 || tmp > INT32_MAX) {
+                    WHISPER_LOG_ERROR("%s: tensor size overflow in model file\n", __func__);
+                    return false;
+                }
+                nelements = (int32_t) tmp;
             }
 
             std::string name;
@@ -5007,11 +5026,30 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                 break;
             }
 
+            if (n_dims < 1 || n_dims > 4) {
+                WHISPER_LOG_ERROR("%s: wrong number of dimensions %d in model file\n", __func__, n_dims);
+                return nullptr;
+            }
+
+            if (length < 0 || length > 1024) {
+                WHISPER_LOG_ERROR("%s: invalid tensor name length %d in model file\n", __func__, length);
+                return nullptr;
+            }
+
             int32_t nelements = 1;
             int32_t ne[4] = { 1, 1, 1, 1 };
             for (int i = 0; i < n_dims; ++i) {
                 read_safe(loader, ne[i]);
-                nelements *= ne[i];
+                if (ne[i] <= 0) {
+                    WHISPER_LOG_ERROR("%s: invalid dimension %d size %d in model file\n", __func__, i, ne[i]);
+                    return nullptr;
+                }
+                int64_t tmp = (int64_t) nelements * ne[i];
+                if (tmp <= 0 || tmp > INT32_MAX) {
+                    WHISPER_LOG_ERROR("%s: tensor size overflow in model file\n", __func__);
+                    return nullptr;
+                }
+                nelements = (int32_t) tmp;
             }
 
             std::string name;
