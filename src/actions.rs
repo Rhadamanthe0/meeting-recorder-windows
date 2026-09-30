@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 use crate::meeting::Manifest;
 use crate::platform::silent_command;
 
+#[path = "action_process.rs"]
+mod process;
+
 /// How actions work, for people and their agents; the done page links here
 /// when there are none yet.
 #[cfg(target_os = "windows")]
@@ -151,6 +154,15 @@ fn drain_bounded(mut stream: impl Read) -> Vec<u8> {
 /// Runs `action` on the meeting in `dir`. Blocking; the caller runs it off the
 /// main thread.
 pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, String> {
+    run_with_timeout(action, dir, manifest, ACTION_TIMEOUT)
+}
+
+fn run_with_timeout(
+    action: &Action,
+    dir: &Path,
+    manifest: &Manifest,
+    timeout: Duration,
+) -> Result<Outcome, String> {
     let date = gtk::glib::DateTime::from_unix_local(manifest.started_at)
         .and_then(|t| t.format("%Y-%m-%d %H:%M"))
         .map(|s| s.to_string())
@@ -173,7 +185,7 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
             .arg("meeting-action")
             .arg(dir);
     }
-    let mut child = shell
+    shell
         .current_dir(dir)
         .env("MEETING_DIR", dir)
         .env("MEETING_TRANSCRIPT", dir.join("transcript.md"))
@@ -190,9 +202,9 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
         .env("MEETING_AUDIO", audio.unwrap_or_default())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(Stdio::piped());
+    let mut process = process::ActionProcess::spawn(&mut shell).map_err(|e| e.to_string())?;
+    let child = &mut process.child;
     // Drain both pipes while the action runs. Waiting for the child to exit
     // before reading can deadlock when either finite pipe buffer fills.
     let stdout = child.stdout.take().expect("piped stdout");
@@ -203,26 +215,38 @@ pub fn run(action: &Action, dir: &Path, manifest: &Manifest) -> Result<Outcome, 
     // Poll rather than waiting without bound, so a hanging action cannot leak
     // this worker thread and leave the "running" toast on screen forever.
     let started = Instant::now();
-    let status = loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break status,
-            None if started.elapsed() >= ACTION_TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "timed out after {} minutes",
-                    ACTION_TIMEOUT.as_secs() / 60
-                ));
+    let mut status = None;
+    let result = loop {
+        if status.is_none() {
+            match process.child.try_wait() {
+                Ok(value) => status = value,
+                Err(error) => break Err(error.to_string()),
             }
-            None => std::thread::sleep(Duration::from_millis(100)),
         }
+        if let Some(status) = status
+            && stdout_reader.is_finished()
+            && stderr_reader.is_finished()
+        {
+            break Ok(status);
+        }
+        // Un descendant peut garder les pipes ouverts après la sortie du
+        // shell. La même échéance couvre aussi cette attente de fin des flux.
+        if started.elapsed() >= timeout {
+            break Err(format!(
+                "timed out after {} minutes",
+                timeout.as_secs() / 60
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     };
+    process.terminate();
     let stdout = stdout_reader
         .join()
         .map_err(|_| "could not read action stdout".to_owned())?;
     let stderr = stderr_reader
         .join()
         .map_err(|_| "could not read action stderr".to_owned())?;
+    let status = result?;
     let stdout = String::from_utf8_lossy(&stdout);
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
@@ -332,6 +356,99 @@ fn find_url(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn descendant_fixture() {
+        let Ok(mode) = std::env::var("OMR_ACTION_FIXTURE") else {
+            return;
+        };
+        if mode == "leaf" {
+            for _ in 0..3000 {
+                println!("descendant stdout");
+                eprintln!("descendant stderr");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        let child = silent_command(std::env::current_exe().unwrap())
+            .args([
+                "actions::tests::descendant_fixture",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("OMR_ACTION_FIXTURE", "leaf")
+            .spawn()
+            .unwrap();
+        std::fs::write("descendant.pid", child.id().to_string()).unwrap();
+        if mode == "running" {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn timeout_reaps_descendants_and_pipe_readers_even_after_shell_exit() {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        for mode in ["running", "exited"] {
+            let dir = std::env::temp_dir().join(format!(
+                "mr-action-descendants-{}-{mode}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("fixture.cmd"),
+                format!(
+                    "@echo off\r\nset OMR_ACTION_FIXTURE={mode}\r\n\"{}\" actions::tests::descendant_fixture --exact --nocapture\r\n",
+                    std::env::current_exe().unwrap().display()
+                ),
+            )
+            .unwrap();
+            let manifest = Manifest {
+                title: "Test".into(),
+                started_at: 0,
+                duration_secs: 0,
+                format: crate::export::Format::Mono,
+                language: "en".into(),
+                speakers: Vec::new(),
+                labels: Vec::new(),
+                imported: None,
+                speaker_count: None,
+                model: None,
+                chapters: Vec::new(),
+                chapters_by: None,
+            };
+            let action = Action {
+                name: "Descendant fixture".into(),
+                command: "fixture.cmd".into(),
+            };
+            let started = Instant::now();
+            let result = run_with_timeout(&action, &dir, &manifest, Duration::from_secs(2));
+            let error = result.err().unwrap();
+            assert!(error.starts_with("timed out"), "{mode}: {error}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+            // run_with_timeout a joint les deux lecteurs avant de revenir.
+            // Vérifier aussi l'arrêt du descendant, pas seulement des lecteurs.
+            let pid = std::fs::read_to_string(dir.join("descendant.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            unsafe {
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if !handle.is_null() {
+                    let mut code = 0;
+                    let queried = GetExitCodeProcess(handle, &mut code);
+                    CloseHandle(handle);
+                    assert_ne!(queried, 0);
+                    assert_ne!(code, STILL_ACTIVE as u32);
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
 
     #[test]
     fn reads_actions_and_skips_the_rest() {
