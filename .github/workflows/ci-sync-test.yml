@@ -1,0 +1,4 @@
+name: ci-sync-test
+on:
+  push:
+    branches: [test-sync]
