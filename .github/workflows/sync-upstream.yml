@@ -1,0 +1,155 @@
+name: sync-upstream
+
+# Synchronisation quotidienne de l'amont Linux vers ce depot Windows.
+# Anti-boucle GitHub (bloquant confirme) : un push/PR cree avec le
+# GITHUB_TOKEN par defaut ne declenche AUCUN autre workflow, SAUF
+# `workflow_dispatch`/`repository_dispatch`. La chaine est donc construite
+# en dispatches explicites, sans PAT :
+#   sync-upstream --(dispatch)--> windows.yml (CI sur la branche sync)
+#   sync-upstream --(merge direct, check `build` du run dispatche)--> master
+#   sync-upstream --(tag + dispatch)--> release.yml (MSI)
+# Le tag pousse par ce workflow (GITHUB_TOKEN) ne declenche PAS release.yml
+# (anti-boucle) : c'est le dispatch explicite `gh workflow run release.yml
+# -f tag=vX.Y.Z` qui publie la release. `tag-on-version.yml` (push master)
+# ne tourne donc pas sur les merges bot -> pas de doublon de tag.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/jankeesvw/omarchy-meeting-recorder.git
+          git fetch upstream master
+
+      - name: Merge upstream, bump patch, PR, CI, merge, tag, release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Deja a jour : rien a faire, sans PR.
+          if git diff HEAD upstream/master --quiet; then
+            echo "Up to date with upstream/master, nothing to do."
+            exit 0
+          fi
+          BRANCH="sync/upstream-${GITHUB_RUN_ID}"
+          # Branche creee avant le merge (reprise de l'existant teste) :
+          # master local reste propre, le merge vit sur la branche sync.
+          git checkout -b "$BRANCH"
+          HAVE_CONFLICT=false
+          if git merge upstream/master --no-edit; then
+            echo "Merge upstream/master sans conflit."
+          else
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              HAVE_CONFLICT=true
+            else
+              echo "Echec du merge sans fichier en conflit, abandon."
+              git merge --abort
+              exit 1
+            fi
+          fi
+          # Conflit : on pousse quand meme la branche pour resolution
+          # manuelle. PR laissee ouverte, PAS d'auto-merge possible.
+          if [ "$HAVE_CONFLICT" = true ]; then
+            CONFLICT_FILES="$(git diff --name-only --diff-filter=U)"
+            echo "Fichiers en conflit :"
+            echo "$CONFLICT_FILES"
+            git add -A
+            git commit -m "Sync upstream (conflits, resolution manuelle requise)"
+            git push -u origin "$BRANCH"
+            gh pr create --base master --head "$BRANCH" --title "Sync upstream" --body "$(printf 'Merge de upstream/master avec des conflits a resoudre a la main.\nLa PR ne pourra pas merger tant que les conflits ne sont pas resolus.\n\nFichiers en conflit :\n%s\n' "$CONFLICT_FILES")"
+            PR_NUM="$(gh pr view "$BRANCH" --json number --jq .number)"
+            gh pr comment "$PR_NUM" --body "$(printf 'Conflits a resoudre a la main :\n%s\n' "$CONFLICT_FILES")"
+            echo "PR #$PR_NUM laisse ouverte (conflits), PAS d'auto-merge."
+            exit 0
+          fi
+          # Sans conflit : bump patch, commit, push, PR.
+          # sed repris tel quel de l'existant (teste sur copie).
+          VERSION="$(sed -n '3s/version = "\(.*\)"/\1/p' Cargo.toml)"
+          NEW_VERSION="$(echo "$VERSION" | awk -F. '{print $1 "." $2 "." $3 + 1}')"
+          echo "Bump patch : $VERSION vers $NEW_VERSION"
+          sed -i "3s/version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+          sed -i "/name = \"meeting-recorder-windows\"/{n;s/version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.lock
+          git add Cargo.toml Cargo.lock
+          git commit -m "Sync upstream v$NEW_VERSION"
+          git push -u origin "$BRANCH"
+          gh pr create --base master --head "$BRANCH" --title "Sync upstream v$NEW_VERSION" --body "Synchronisation automatique de upstream/master (jankeesvw/omarchy-meeting-recorder). Merge sans conflit, bump patch v$VERSION vers v$NEW_VERSION."
+          PR_NUM="$(gh pr view "$BRANCH" --json number --jq .number)"
+          echo "PR #$PR_NUM creee."
+          # Dispatch explicite de la CI : contourne l'anti-boucle (le push
+          # de la branche par GITHUB_TOKEN n'aurait declenche aucun
+          # workflow). On attend la fin de CE run dispatch.
+          DISPATCH_EPOCH="$(date -u +%s)"
+          gh workflow run windows.yml --ref "$BRANCH"
+          echo "Workflow windows.yml dispatche sur $BRANCH, attente du run..."
+          RUN_ID=""
+          for _ in $(seq 1 12); do
+            sleep 15
+            LIST="$(gh run list --workflow=windows.yml --branch="$BRANCH" --event=workflow_dispatch --limit 5 --json databaseId,createdAt)"
+            RUN_ID="$(echo "$LIST" | jq -r --argjson since "$DISPATCH_EPOCH" '[.[] | select((.createdAt | fromdateiso8601) >= $since)] | sort_by(.createdAt) | .[0].databaseId // empty')"
+            if [ -n "$RUN_ID" ]; then
+              break
+            fi
+          done
+          if [ -z "$RUN_ID" ]; then
+            gh pr comment "$PR_NUM" --body "CI dispatchee (windows.yml sur $BRANCH) introuvable dans la liste des runs ; PR laissee ouverte pour verification manuelle."
+            exit 0
+          fi
+          echo "Run CI suivi : $RUN_ID"
+          STATUS=""
+          CONCLUSION=""
+          for _ in $(seq 1 45); do
+            sleep 60
+            EVAL="$(gh run view "$RUN_ID" --json status,conclusion --jq '\(.status) \(.conclusion)')"
+            STATUS="${EVAL%% *}"
+            CONCLUSION="${EVAL##* }"
+            echo "CI $RUN_ID : status=$STATUS conclusion=$CONCLUSION"
+            if [ "$STATUS" = "completed" ]; then
+              break
+            fi
+          done
+          if [ "$STATUS" != "completed" ]; then
+            gh pr comment "$PR_NUM" --body "CI toujours en cours apres ~45 min sur $BRANCH ; PR laissee ouverte."
+            exit 0
+          fi
+          if [ "$CONCLUSION" != "success" ]; then
+            gh pr comment "$PR_NUM" --body "CI rouge sur la branche sync, PR laissee ouverte."
+            exit 0
+          fi
+          # Merge direct autorise : le check `build` du run dispatche porte
+          # sur le head SHA de la PR et satisfait la protection de branche.
+          gh pr merge "$PR_NUM" --squash --subject "Sync upstream v$NEW_VERSION"
+          echo "PR #$PR_NUM mergee (squash)."
+          git fetch origin master
+          git checkout -B tmp-release origin/master
+          V="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "Version sur master : $V"
+          # Le tag est pousse pour archive ; son push par GITHUB_TOKEN ne
+          # declenchera PAS release.yml (anti-boucle), c'est le dispatch
+          # suivant qui s'en charge. Le tag remote est garde (pas de -d).
+          if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "Tag v$V deja existant, pas de doublon."
+          else
+            git tag -a "v$V" -m "v$V"
+            git push origin "v$V"
+            echo "Tag v$V cree et pousse."
+          fi
+          gh workflow run release.yml --ref master -f tag="v$V"
+          echo "Resume : PR #$PR_NUM mergee, tag v$V pousse, release.yml dispatchee (tag=v$V)."
+          exit 0

@@ -1,0 +1,38 @@
+name: tag-on-version
+
+# Tag de release automatique quand master porte une version non taggee.
+# Le tag v* declenche le workflow `release` (release.yml).
+# Non-doublon avec sync-upstream (etape 11) : les merges/pushs effectues
+# par ce workflow via le GITHUB_TOKEN (bot) ne produisent AUCUN evenement
+# push declencheur (anti-boucle GitHub), donc ce workflow ne tourne pas sur
+# les merges bot ; sync-upstream cree et pousse lui-meme le tag puis
+# dispatche release.yml. Ce workflow ne tag que les merges de comptes reels.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag release if version untagged
+        run: |
+          set -e
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "Version Cargo.toml : $VERSION"
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "Tag v$VERSION deja existant, rien a faire."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "v$VERSION"
+          echo "Tag v$VERSION cree et pousse (declenche release.yml)."

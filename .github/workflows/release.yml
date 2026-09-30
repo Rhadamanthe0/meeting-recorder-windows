@@ -1,11 +1,21 @@
 name: release
 
-# Release Windows déclenchée par tag v* (ex. v0.1.0). Build identique à
-# windows.yml (toolchain GNU + MSYS2 UCRT64), puis publication GitHub.
+# Release Windows déclenchée par tag v* (ex. v0.1.0), ou par dispatch manuel
+# `gh workflow run release.yml -f tag=vX.Y.Z` (contourne l'anti-boucle : un
+# push de tag effectué avec le GITHUB_TOKEN ne déclenche aucun workflow).
+# Build identique à windows.yml (toolchain GNU + MSYS2 UCRT64), puis
+# publication GitHub.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag v à publier (ex v0.1.10)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -21,6 +31,23 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+
+      # Dispatch manuel : aligne le contenu sur le tag s'il existe déjà sur
+      # origin, sinon reste sur master (le numéro de version vient alors de
+      # l'input). Push de tag : comportement inchangé (checkout du tag).
+      - name: Aligne sur le tag dispatché si présent
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          git fetch origin --tags --force
+          git rev-parse --verify "refs/tags/$env:TAG" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            git checkout "refs/tags/$env:TAG"
+            Write-Output "[ci] checkout tag $env:TAG"
+          } else {
+            Write-Output "[ci] tag $env:TAG absent d'origin, reste sur master"
+          }
 
       # Même stratégie GTK que windows.yml : hôte GNU aligné sur MinGW UCRT64.
       - name: Install Rust stable GNU
@@ -172,11 +199,15 @@ jobs:
 
       # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
       # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
-      # Version = tag déclencheur sans le v initial, sinon 0.1.0.
+      # Version = input `tag` du dispatch si fourni, sinon tag déclencheur
+      # sans le v initial, sinon 0.1.0.
       - name: Build MSI
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           $version = "0.1.0"
           $ref = $env:GITHUB_REF_NAME
+          if ($env:INPUT_TAG) { $ref = $env:INPUT_TAG }
           if ($ref -match '^v?(\d+(?:\.\d+)*)$') {
             $parts = @($Matches[1] -split '\.')
             while ($parts.Count -lt 3) { $parts += "0" }
@@ -213,6 +244,7 @@ jobs:
       - name: Publie la release GitHub
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/**/*.msi
           generate_release_notes: true
