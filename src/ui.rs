@@ -230,6 +230,7 @@ impl Hub {
 /// Runs the app. `open` is a `.meeting-recorder` file or a meeting folder to show
 /// instead of starting a new recording.
 pub fn run(open: Option<&str>) -> glib::ExitCode {
+    purge_import_staging();
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
@@ -3145,7 +3146,11 @@ impl Recorder {
         // got a number when the name was taken. Only a new name renames.
         let renamed = !folder_is_for(&current, &target);
         if renamed {
-            if target.exists() {
+            // A case-only rename (`weekly` → `Weekly`) is the same folder:
+            // `Path::exists` is case-insensitive on Windows and would refuse
+            // it as "already exists", so the existence check is skipped and
+            // `fs::rename` (which handles case-only renames) does the job.
+            if !is_case_only_rename(&current, &target) && target.exists() {
                 self.toast("A meeting folder with that name already exists");
                 return;
             }
@@ -3257,6 +3262,18 @@ fn folder_is_for(folder: &std::path::Path, expected: &std::path::Path) -> bool {
                     .strip_prefix(' ')
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
+}
+
+/// Whether `target` is `current` with only the case changed (`weekly` →
+/// `Weekly`): same bytes case-insensitively, but not identical. Compared on
+/// the whole path as `OsStr` bytes, like `meeting::find` compares its
+/// extension.
+fn is_case_only_rename(current: &std::path::Path, target: &std::path::Path) -> bool {
+    current != target
+        && current
+            .as_os_str()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(target.as_os_str().as_encoded_bytes())
 }
 
 fn output_dir(started_at: i64, title: &str) -> PathBuf {
@@ -3490,6 +3507,23 @@ fn redraw(widget: &impl IsA<gtk::Widget>) {
     while let Some(current) = child {
         redraw(&current);
         child = current.next_sibling();
+    }
+}
+
+/// Staging folders of imports (`import-*`) left behind by a crash during
+/// `import_audio` (hundreds of MB of `mic.raw`); the recovery filter excludes
+/// them but nothing deleted them. Best-effort purge at startup, before any
+/// import of this run exists (they are created after), so there is nothing
+/// live to collide with. Errors are silently ignored: no panic, no UI block.
+fn purge_import_staging() {
+    let Ok(entries) = std::fs::read_dir(crate::platform::cache_dir().join(APP_NAME)) else {
+        return;
+    };
+    for dir in entries.flatten().map(|e| e.path()).filter(|dir| {
+        dir.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("import-"))
+    }) {
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -3864,6 +3898,27 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn case_only_rename_is_the_same_folder() {
+        use std::path::Path;
+        assert!(is_case_only_rename(
+            Path::new("/Meetings/202609241400 weekly"),
+            Path::new("/Meetings/202609241400 Weekly"),
+        ));
+        assert!(!is_case_only_rename(
+            Path::new("/Meetings/202609241400 weekly"),
+            Path::new("/Meetings/202609241400 weekly"),
+        ));
+        assert!(!is_case_only_rename(
+            Path::new("/Meetings/202609241400 weekly"),
+            Path::new("/Meetings/202609241400 Standup"),
+        ));
+        assert!(!is_case_only_rename(
+            Path::new("/Meetings/202609241400 weekly"),
+            Path::new("/Other/202609241400 WEEKLY"),
+        ));
+    }
 
     #[test]
     fn reserved_device_names_get_a_suffix_with_or_without_extension() {
