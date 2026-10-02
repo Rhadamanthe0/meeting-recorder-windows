@@ -8,7 +8,9 @@ Dépôt : https://github.com/Rhadamanthe0/meeting-recorder-windows
 
 - Micro + son du PC enregistrés ensemble, sans bot à inviter.
 - Transcription Whisper en local, en français.
-- Qui-a-dit-quoi avec Nemotron local, jusqu'à 8 voix.
+- Qui-a-dit-quoi avec Nemotron local, jusqu'à 8 voix ; l'écho du PC dans le
+  micro n'est pas compté comme un locuteur, et deux locuteurs renommés à
+  l'identique n'en font plus qu'un.
 - Résumé et actions via LM Studio ou Ollama, en local.
 - Historique des réunions + import d'un fichier audio.
 - 0 €, rien ne sort du PC.
@@ -43,6 +45,7 @@ git pull
 2. Transcrivez, puis demandez un résumé.
 
 ```powershell
+meeting-recorder-windows.exe start "Point hebdo"   # ouvre l'app si besoin et enregistre sous ce nom
 meeting-recorder-windows.exe transcribe-file interview.mp3 --speakers 2 > transcript.md
 Get-Content transcript.md | meeting-recorder-windows.exe ask "Résume en 5 points"
 meeting-recorder-windows.exe watch

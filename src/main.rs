@@ -68,8 +68,24 @@ fn main() -> glib::ExitCode {
             glib::ExitCode::SUCCESS
         }
         Some(command @ ("start" | "stop" | "compact" | "pause")) => {
-            if ipc::send(command) {
+            let line = if command == "start" {
+                ipc::start_line(&std::env::args().skip(2).collect::<Vec<_>>())
+            } else {
+                command.to_owned()
+            };
+            if ipc::send(&line) {
                 glib::ExitCode::SUCCESS
+            } else if command == "start" {
+                // Not running: open the recorder, and start as soon as it listens.
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if ipc::send(&line) {
+                            return;
+                        }
+                    }
+                });
+                ui::run(None)
             } else {
                 eprintln!("{APP_NAME}: the recorder is not running");
                 glib::ExitCode::FAILURE
@@ -92,12 +108,12 @@ fn main() -> glib::ExitCode {
         Some("ask") => agent::cli(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("-h" | "--help") => {
             println!(
-                "Usage: {APP_NAME} [start | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]"
+                "Usage: {APP_NAME} [start [name] | stop | pause | compact | watch | transcribe <mic> <computer> [--language xx]]"
             );
             println!();
             println!("  (no command)  open the recorder, ready to record");
             println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
-            println!("  start         start recording in the open window (for a keybinding)");
+            println!("  start [name]  start recording, opening the recorder if needed");
             println!("  stop          stop the running recording (for a keybinding)");
             println!("  compact       switch the recording window between full and compact");
             println!("  pause         pause or resume the running recording");
