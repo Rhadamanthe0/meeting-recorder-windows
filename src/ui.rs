@@ -134,7 +134,7 @@ impl Hub {
                 let Some(hub) = weak.upgrade() else {
                     break;
                 };
-                hub.command(&app_for_commands, command);
+                hub.command(&app_for_commands, command.0, &command.1);
             }
         });
 
@@ -230,7 +230,8 @@ impl Hub {
     }
 
     /// A command from the socket: `omarchy-meeting-recorder start` and friends.
-    fn command(self: &Rc<Self>, app: &adw::Application, command: &str) {
+    /// `title` is the name that came with `start`, "" without one.
+    fn command(self: &Rc<Self>, app: &adw::Application, command: &str, title: &str) {
         if command == "new-window" {
             self.add_window(app).window.present();
             return;
@@ -242,11 +243,15 @@ impl Hub {
             _ => self.target(app),
         };
         match command {
-            // A name typed on the ready page is kept; from the done page
-            // it starts fresh.
-            "start" if r.state.get() == State::Idle => r.start(),
-            "start" if r.state.get() == State::Done => {
-                r.ready();
+            // A name typed on the ready page is kept unless the command
+            // brings one; from the done page it starts fresh.
+            "start" if matches!(r.state.get(), State::Idle | State::Done) => {
+                if r.state.get() == State::Done {
+                    r.ready();
+                }
+                if !title.is_empty() {
+                    r.title_row.set_text(title);
+                }
                 r.start();
             }
             "stop" => r.stop(),
@@ -2176,6 +2181,10 @@ impl Recorder {
                             if let Some(name) = known.get(label) {
                                 return name.clone();
                             }
+                            // One voice where there were several: the name of the first.
+                            if let Some(name) = known.get(&format!("{label} 1")) {
+                                return name.clone();
+                            }
                             match meeting::side_of(label) {
                                 // The first voice on the mic is you.
                                 Some((side, 1)) => {
@@ -3010,7 +3019,7 @@ impl Recorder {
             .manifest
             .borrow()
             .as_ref()
-            .map(|m| m.speakers.clone())
+            .map(|m| m.people())
             .unwrap_or_default();
         if speakers.len() < 2 {
             return;
@@ -3081,7 +3090,8 @@ impl Recorder {
         }
     }
 
-    /// One name row per speaker under the meeting name.
+    /// One name row per person under the meeting name. Speakers given the same
+    /// name share a row: that is how two voices that were one person are merged.
     fn show_speakers(self: &Rc<Self>) {
         for row in self.speaker_rows.borrow_mut().drain(..) {
             self.done_group.remove(&row);
@@ -3091,7 +3101,12 @@ impl Recorder {
         };
         let mut rows = Vec::new();
         let labels = manifest.default_labels();
-        for (i, name) in manifest.speakers.iter().enumerate() {
+        for name in manifest.people() {
+            let i = manifest
+                .speakers
+                .iter()
+                .position(|s| *s == name)
+                .unwrap_or(0);
             let side = labels.get(i).and_then(|l| meeting::side_of(l));
             let title = match (manifest.imported.is_some(), side) {
                 (true, _) | (false, None) => format!("Speaker {}", i + 1),
@@ -3110,7 +3125,7 @@ impl Recorder {
             };
             let row = adw::EntryRow::builder()
                 .title(title)
-                .text(name)
+                .text(&name)
                 .show_apply_button(true)
                 .build();
             let weak = Rc::downgrade(self);
@@ -3134,8 +3149,9 @@ impl Recorder {
         *self.speaker_rows.borrow_mut() = rows;
     }
 
-    /// Renames the speakers in transcript.md and the manifest. Your own name is
-    /// also remembered for the next recordings.
+    /// Renames the speakers in transcript.md and the manifest. A name that
+    /// another speaker already has merges the two. Your own name is also
+    /// remembered for the next recordings.
     fn apply_speakers(self: &Rc<Self>) {
         if self.state.get() != State::Done {
             return;
@@ -3147,41 +3163,42 @@ impl Recorder {
             return;
         };
         let labels = manifest.default_labels();
-        let names: Vec<String> = self
+        let people = manifest.people();
+        let typed: Vec<String> = self
             .speaker_rows
             .borrow()
             .iter()
+            .map(|row| row.text().trim().replace(['*', '[', ']', ':', '\n'], ""))
+            .collect();
+        if typed.len() != people.len() {
+            return;
+        }
+        let names: Vec<String> = manifest
+            .speakers
+            .iter()
             .enumerate()
-            .map(|(i, row)| {
-                let text = row.text().trim().replace(['*', '[', ']', ':', '\n'], "");
-                if text.is_empty() {
+            .map(|(i, name)| {
+                let row = people.iter().position(|p| p == name).unwrap_or(0);
+                if typed[row].is_empty() {
                     labels
                         .get(i)
                         .cloned()
                         .unwrap_or_else(|| format!("Speaker {}", i + 1))
                 } else {
-                    text
+                    typed[row].clone()
                 }
             })
             .collect();
         if names.is_empty() || names == manifest.speakers {
             return;
         }
-        let mut unique = names.clone();
-        unique.sort();
-        unique.dedup();
-        if unique.len() != names.len() {
-            self.toast("Every speaker needs a different name");
-            self.show_speakers();
-            return;
+        let merged = names.iter().collect::<std::collections::HashSet<_>>().len() < people.len();
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for (from, to) in manifest.speakers.iter().zip(&names) {
+            if from != to && !renames.iter().any(|(f, _)| f == from) {
+                renames.push((from.clone(), to.clone()));
+            }
         }
-        let renames: Vec<(String, String)> = manifest
-            .speakers
-            .iter()
-            .cloned()
-            .zip(names.iter().cloned())
-            .filter(|(from, to)| from != to)
-            .collect();
         let transcript = dir.join("transcript.md");
         let mut saved = true;
         match std::fs::read_to_string(&transcript) {
@@ -3208,7 +3225,11 @@ impl Recorder {
         }
         let text = std::fs::read_to_string(&transcript).ok();
         self.redraw_transcript(text.as_deref().unwrap_or(""));
-        self.toast("Saved");
+        if merged {
+            self.toast("Merged into one speaker");
+        } else {
+            self.toast("Saved");
+        }
     }
 
     /// Renames the meeting folder after the name and rewrites the transcript heading.

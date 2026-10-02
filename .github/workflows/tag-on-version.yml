@@ -2,11 +2,9 @@ name: tag-on-version
 
 # Tag de release automatique quand master porte une version non taggee.
 # Le tag v* declenche le workflow `release` (release.yml).
-# Non-doublon avec sync-upstream (etape 11) : les merges/pushs effectues
-# par ce workflow via le GITHUB_TOKEN (bot) ne produisent AUCUN evenement
-# push declencheur (anti-boucle GitHub), donc ce workflow ne tourne pas sur
-# les merges bot ; sync-upstream cree et pousse lui-meme le tag puis
-# dispatche release.yml. Ce workflow ne tag que les merges de comptes reels.
+# Les pushs effectues avec le GITHUB_TOKEN (bot) ne produisent AUCUN
+# evenement push declencheur (anti-boucle GitHub) : ce workflow ne tag que
+# les merges de comptes reels.
 on:
   push:
     branches: [master]
@@ -44,7 +42,7 @@ jobs:
       # PAS release.yml (anti-boucle GitHub : les pushs du token par defaut
       # n'emettent aucun evenement declencheur — preuve : le tag v0.1.10 cree
       # par ce workflow n'a lance aucune release, dispatch manuel requis).
-      # D'ou ce dispatch explicite, comme sync-upstream.yml apres son tag.
+      # D'ou ce dispatch explicite.
       - name: Dispatch release (contourne l'anti-boucle GITHUB_TOKEN)
         if: steps.tag.outputs.created == 'true'
         env:

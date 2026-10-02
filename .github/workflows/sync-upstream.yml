@@ -1,212 +1,59 @@
 name: sync-upstream
 
-# Synchronisation quotidienne de l'amont Linux vers ce depot Windows.
-# Anti-boucle GitHub (bloquant confirme) : un push/PR cree avec le
-# GITHUB_TOKEN par defaut ne declenche AUCUN autre workflow, SAUF
-# `workflow_dispatch`/`repository_dispatch`. La chaine est donc construite
-# en dispatches explicites, sans PAT :
-#   sync-upstream --(dispatch)--> windows.yml (CI sur la branche sync)
-#   sync-upstream --(check `build` du run dispatche)--> PR a examiner
-# La PR doit ensuite etre approuvee et fusionnee par un mainteneur. Le
-# workflow ne fusionne ni ne publie jamais du code provenant de l'amont.
-# Deduplication : si une PR sync/upstream-* est deja ouverte en revue,
-# aucun doublon n'est cree. Meme delta (master et upstream/main ancetres
-# du tip) -> exit 0 sans PR ni bump. Delta different ->
-# mise a jour sur place de la PR existante (branche temporaire depuis
-# origin/master, merge, meme bump patch, checkout -B + push --force-with-lease ;
-# force-push assume sur ces branches bot sync/upstream-* en attente
-# de revue, jamais de merge/tag/release auto).
+# Veille de l'amont Linux (jankeesvw/omarchy-meeting-recorder). Le portage
+# Windows a ete copie de l'amont v1.4.0 sans son historique git : un merge
+# automatique est impossible ("unrelated histories"), et la plupart des
+# changements amont (barre Waybar, AUR, archives Linux) n'ont pas de sens
+# ici. Ce workflow ne touche donc pas au code : a chaque nouvelle version
+# amont, il ouvre une issue qui liste ses changements, a trier et porter a
+# la main. La derniere version amont examinee est dans .github/upstream-version.
 on:
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
 
-# Une seule synchronisation active : deux runs ne doivent pas creer deux PR.
-concurrency:
-  group: sync-upstream
-  cancel-in-progress: false
-
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
+  issues: write
 
 jobs:
-  sync:
+  watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Fetch upstream
-        run: |
-          git remote add upstream https://github.com/jankeesvw/omarchy-meeting-recorder.git
-          git fetch upstream main
-          git fetch origin master
-
-      - name: Merge upstream, bump patch, open PR, and run CI
+      - name: Ouvrir une issue pour chaque nouvelle version amont
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          UPSTREAM: jankeesvw/omarchy-meeting-recorder
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Deja a jour : rien a faire, sans PR.
-          if git diff HEAD upstream/main --quiet; then
-            echo "Up to date with upstream/main, nothing to do."
-            exit 0
-          fi
-          git fetch origin master
-          REUSED=false
-          BRANCH=""
-          PR_NUM=""
-          EXIST_JSON="$(gh pr list --base master --state open --json number,headRefName --jq '[.[] | select(.headRefName | startswith("sync/upstream-"))] | sort_by(.number) | .[0] // empty')"
-          if [ -n "$EXIST_JSON" ]; then
-            NUM="$(echo "$EXIST_JSON" | jq -r .number)"
-            EXIST_BRANCH="$(echo "$EXIST_JSON" | jq -r .headRefName)"
-            # checkout@v4 ne cree pas de branche locale pour la PR ouverte.
-            EXIST_REF="refs/remotes/origin/$EXIST_BRANCH"
-            git fetch origin "+refs/heads/$EXIST_BRANCH:$EXIST_REF"
-            EXIST_SHA="$(git rev-parse "$EXIST_REF")"
-            UP_SHA="$(git rev-parse upstream/main)"
-            # Le tip est le bump (un parent), pas le merge. L'ascendance
-            # couvre aussi un merge fast-forward suivi du bump.
-            if git merge-base --is-ancestor origin/master "$EXIST_SHA" && git merge-base --is-ancestor "$UP_SHA" "$EXIST_SHA"; then
-              echo "PR #$NUM ($EXIST_BRANCH) covers this delta (upstream/main @ $UP_SHA), nothing to do."
-              exit 0
-            fi
-            echo "PR #$NUM ($EXIST_BRANCH) en revue avec un delta different, mise a jour sur place."
-            git checkout -B tmp-sync-reuse origin/master
-            if git merge upstream/main --no-edit; then
-              echo "Merge d'essai upstream/main sans conflit."
-            else
-              git merge --abort || true
-              git branch -D tmp-sync-reuse || true
-              gh pr comment "$NUM" --body "upstream a avancé mais le merge est en conflit ; mise à jour manuelle requise (upstream/main @ $UP_SHA)."
-              echo "Conflit lors de la mise a jour de #$NUM, branche existante inchangee."
-              exit 0
-            fi
-            VERSION="$(sed -n '3s/version = "\(.*\)"/\1/p' Cargo.toml)"
-            if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-              echo "Version amont invalide dans Cargo.toml : $VERSION" >&2
-              exit 1
-            fi
-            MAJOR="${BASH_REMATCH[1]}"
-            MINOR="${BASH_REMATCH[2]}"
-            PATCH="${BASH_REMATCH[3]}"
-            NEW_VERSION="$MAJOR.$MINOR.$((10#$PATCH + 1))"
-            echo "Bump patch : $VERSION vers $NEW_VERSION"
-            sed -i "3s/version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
-            sed -i "/name = \"meeting-recorder-windows\"/{n;s/version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.lock
-            git add Cargo.toml Cargo.lock
-            git commit -m "Sync upstream v$NEW_VERSION"
-            git checkout -B "$EXIST_BRANCH" tmp-sync-reuse
-            git push --force-with-lease="refs/heads/$EXIST_BRANCH:$EXIST_SHA" origin "$EXIST_BRANCH"
-            git branch -D tmp-sync-reuse
-            BRANCH="$EXIST_BRANCH"
-            PR_NUM="$NUM"
-            gh pr comment "$PR_NUM" --body "mise à jour avec upstream/main @ $UP_SHA (merge + bump v$VERSION vers v$NEW_VERSION)."
-            REUSED=true
-          fi
-          if [ "$REUSED" != "true" ]; then
-          BRANCH="sync/upstream-${GITHUB_RUN_ID}"
-          # Branche creee avant le merge (reprise de l'existant teste) :
-          # master local reste propre, le merge vit sur la branche sync.
-          git checkout -b "$BRANCH"
-          HAVE_CONFLICT=false
-          if git merge upstream/main --no-edit; then
-            echo "Merge upstream/main sans conflit."
-          else
-            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
-              HAVE_CONFLICT=true
-            else
-              echo "Echec du merge sans fichier en conflit, abandon."
-              git merge --abort
-              exit 1
-            fi
-          fi
-          # Conflit : on pousse quand meme la branche pour resolution
-          # manuelle. PR laissee ouverte, PAS d'auto-merge possible.
-          if [ "$HAVE_CONFLICT" = true ]; then
-            CONFLICT_FILES="$(git diff --name-only --diff-filter=U)"
-            echo "Fichiers en conflit :"
-            echo "$CONFLICT_FILES"
-            git add -A
-            git commit -m "Sync upstream (conflits, resolution manuelle requise)"
-            git push -u origin "$BRANCH"
-            gh pr create --base master --head "$BRANCH" --title "Sync upstream" --body "$(printf 'Merge de upstream/main avec des conflits a resoudre a la main.\nLa PR ne pourra pas merger tant que les conflits ne sont pas resolus.\n\nFichiers en conflit :\n%s\n' "$CONFLICT_FILES")"
-            PR_NUM="$(gh pr view "$BRANCH" --json number --jq .number)"
-            gh pr comment "$PR_NUM" --body "$(printf 'Conflits a resoudre a la main :\n%s\n' "$CONFLICT_FILES")"
-            echo "PR #$PR_NUM laisse ouverte (conflits), PAS d'auto-merge."
-            exit 0
-          fi
-          # Sans conflit : bump patch, commit, push, PR.
-          # Ne construire les commandes sed qu'avec une version strictement
-          # numerique : Cargo.toml vient de l'amont et n'est pas fiable.
-          VERSION="$(sed -n '3s/version = "\(.*\)"/\1/p' Cargo.toml)"
-          if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Version amont invalide dans Cargo.toml : $VERSION" >&2
-            exit 1
-          fi
-          MAJOR="${BASH_REMATCH[1]}"
-          MINOR="${BASH_REMATCH[2]}"
-          PATCH="${BASH_REMATCH[3]}"
-          NEW_VERSION="$MAJOR.$MINOR.$((10#$PATCH + 1))"
-          echo "Bump patch : $VERSION vers $NEW_VERSION"
-          sed -i "3s/version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
-          sed -i "/name = \"meeting-recorder-windows\"/{n;s/version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.lock
-          git add Cargo.toml Cargo.lock
-          git commit -m "Sync upstream v$NEW_VERSION"
-          git push -u origin "$BRANCH"
-          gh pr create --base master --head "$BRANCH" --title "Sync upstream v$NEW_VERSION" --body "Synchronisation automatique de upstream/main (jankeesvw/omarchy-meeting-recorder). Merge sans conflit, bump patch v$VERSION vers v$NEW_VERSION."
-          PR_NUM="$(gh pr view "$BRANCH" --json number --jq .number)"
-          echo "PR #$PR_NUM creee."
-          fi
-          # Dispatch explicite de la CI : contourne l'anti-boucle (le push
-          # de la branche par GITHUB_TOKEN n'aurait declenche aucun
-          # workflow). On attend la fin de CE run dispatch.
-          DISPATCH_EPOCH="$(date -u +%s)"
-          gh workflow run windows.yml --ref "$BRANCH"
-          echo "Workflow windows.yml dispatche sur $BRANCH, attente du run..."
-          RUN_ID=""
-          for _ in $(seq 1 12); do
-            sleep 15
-            LIST="$(gh run list --workflow=windows.yml --branch="$BRANCH" --event=workflow_dispatch --limit 5 --json databaseId,createdAt)"
-            RUN_ID="$(echo "$LIST" | jq -r --argjson since "$DISPATCH_EPOCH" '[.[] | select((.createdAt | fromdateiso8601) >= $since)] | sort_by(.createdAt) | .[0].databaseId // empty')"
-            if [ -n "$RUN_ID" ]; then
-              break
-            fi
+          SEEN="$(tr -d '[:space:]' < .github/upstream-version)"
+          LATEST="$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)"
+          # Noms de tags venus de l'API : refuses s'ils ne sont pas des versions.
+          for tag in "$SEEN" "$LATEST"; do
+            [[ "$tag" =~ ^v[0-9]+(\.[0-9]+)*$ ]] || { echo "Tag inattendu : $tag"; exit 1; }
           done
-          if [ -z "$RUN_ID" ]; then
-            gh pr comment "$PR_NUM" --body "CI dispatchee (windows.yml sur $BRANCH) introuvable dans la liste des runs ; PR laissee ouverte pour verification manuelle."
+          if [ "$SEEN" = "$LATEST" ]; then
+            echo "Amont toujours en $LATEST, rien a faire."
             exit 0
           fi
-          echo "Run CI suivi : $RUN_ID"
-          STATUS=""
-          CONCLUSION=""
-          for _ in $(seq 1 45); do
-            sleep 60
-            EVAL="$(gh run view "$RUN_ID" --json status,conclusion --jq '\(.status) \(.conclusion)')"
-            STATUS="${EVAL%% *}"
-            CONCLUSION="${EVAL##* }"
-            echo "CI $RUN_ID : status=$STATUS conclusion=$CONCLUSION"
-            if [ "$STATUS" = "completed" ]; then
-              break
-            fi
-          done
-          if [ "$STATUS" != "completed" ]; then
-            gh pr comment "$PR_NUM" --body "CI toujours en cours apres ~45 min sur $BRANCH ; PR laissee ouverte."
+          TITLE="Amont $LATEST : changements a trier pour le portage Windows"
+          if [ "$(gh issue list --state open --search "in:title \"Amont $LATEST\"" --json number --jq 'length')" != 0 ]; then
+            echo "Issue deja ouverte pour $LATEST."
             exit 0
           fi
-          if [ "$CONCLUSION" != "success" ]; then
-            gh pr comment "$PR_NUM" --body "CI rouge sur la branche sync, PR laissee ouverte."
-            exit 0
-          fi
-          # Une CI verte ne constitue pas une revue de securite. Laisser la
-          # PR ouverte afin qu'un mainteneur aval approuve explicitement le
-          # contenu importe avant toute fusion, creation de tag ou release.
-          gh pr comment "$PR_NUM" --body "CI verte sur la branche sync. Revue et approbation explicites d'un mainteneur requises avant fusion ; ce workflow ne fusionnera ni ne publiera automatiquement ce contenu amont."
-          echo "PR #$PR_NUM laissee ouverte pour revue et approbation manuelles."
-          exit 0
+          COMMITS="$(gh api "repos/$UPSTREAM/compare/$SEEN...$LATEST" --jq '.commits[] | "- " + (.commit.message | split("\n")[0])')"
+          FILES="$(gh api "repos/$UPSTREAM/compare/$SEEN...$LATEST" --jq '.files[].filename' | sed 's/^/- /')"
+          printf '%s\n' \
+            "L'amont est passe de $SEEN a $LATEST." \
+            "" \
+            "Comparaison : https://github.com/$UPSTREAM/compare/$SEEN...$LATEST" \
+            "" \
+            "## Commits" "$COMMITS" "" \
+            "## Fichiers" "$FILES" "" \
+            "Porter ce qui sert sous Windows (le reste : barre Waybar, AUR, archives Linux), puis mettre $LATEST dans .github/upstream-version." \
+            > body.md
+          gh issue create --title "$TITLE" --body-file body.md
