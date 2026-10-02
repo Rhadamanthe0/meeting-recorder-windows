@@ -2,7 +2,7 @@
 
 Enregistreur de réunions Windows 100 % local et gratuit.
 
-Dépôt : https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
+Dépôt : https://github.com/Rhadamanthe0/meeting-recorder-windows
 
 ## Ça fait quoi
 
@@ -16,7 +16,7 @@ Dépôt : https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
 ## Installation
 
 Voie 1 — RECOMMANDÉE (MSI) : téléchargez `MeetingRecorder-<version>.msi`
-depuis https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows/releases
+depuis https://github.com/Rhadamanthe0/meeting-recorder-windows/releases
 et exécutez-le (double-clic, sans admin : installation per-user).
 Tout est embarqué (GTK, ffmpeg, runtime).
 Prérequis restant : LM Studio ou Ollama lancé en local (résumé et actions).
@@ -25,8 +25,8 @@ Voie 2 — source (avancé) : prérequis manuels Rust GNU (hôte
 x86_64-pc-windows-gnu), MSYS2 UCRT64 (GTK4/libadwaita) et ffmpeg, puis :
 
 ```powershell
-git clone https://github.com/Rhadamanthe0/omarchy-meeting-recorder-windows
-cd omarchy-meeting-recorder-windows
+git clone https://github.com/Rhadamanthe0/meeting-recorder-windows
+cd meeting-recorder-windows
 cargo build --release
 .\target\release\meeting-recorder-windows.exe
 ```
