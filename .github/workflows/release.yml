@@ -12,13 +12,18 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag v à publier (ex v0.1.10)"
-        required: false
+        description: "Tag v existant à publier (ex v0.1.10) ; absent = échec, jamais master"
+        required: true
         default: ""
         type: string
 
 permissions:
   contents: read
+
+# Un dispatch annule le run precedent du meme tag (build + MSI couteux).
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -34,22 +39,45 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Dispatch manuel : aligne le contenu sur le tag s'il existe déjà sur
-      # origin, sinon reste sur master (le numéro de version vient alors de
-      # l'input). Push de tag : comportement inchangé (checkout du tag).
-      - name: Aligne sur le tag dispatché si présent
+      # Dispatch manuel : le tag doit exister sur origin, sinon échec.
+      # Publier un MSI `X.Y.Z` depuis master quand `vX.Y.Z` n'existe pas est
+      # interdit : la chaîne est tag existant -> checkout exact -> version
+      # Cargo == version tag -> build MSI -> smoke test de CE MSI ->
+      # publication du même artefact.
+      - name: Aligne sur le tag dispatché (existant, sinon échec)
         if: inputs.tag != ''
         env:
           TAG: ${{ inputs.tag }}
         run: |
           git fetch origin --tags --force
           git rev-parse --verify "refs/tags/$env:TAG" 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            git checkout "refs/tags/$env:TAG"
-            Write-Output "[ci] checkout tag $env:TAG"
-          } else {
-            Write-Output "[ci] tag $env:TAG absent d'origin, reste sur master"
+          if ($LASTEXITCODE -ne 0) {
+            throw "tag $env:TAG absent d'origin : dispatch refusé (jamais de build depuis master pour une release X.Y.Z)"
           }
+          git checkout "refs/tags/$env:TAG"
+          Write-Output "[ci] checkout tag $env:TAG"
+
+      # Garde-fou fail-closed : pas de tag demandé et pas de push de tag =
+      # rien à publier (ex. dispatch sans input).
+      - name: Refuse un build release sans tag
+        if: inputs.tag == '' && github.ref_type != 'tag'
+        run: |
+          throw "aucun tag (ni dispatch ni push de tag) : release refusée"
+
+      # La version Cargo doit être exactement celle du tag : un MSI 0.1.10
+      # ne doit jamais sortir d'un code 0.1.11.
+      - name: Version Cargo == version tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          $ref = $env:INPUT_TAG
+          if (-not $ref) { $ref = $env:GITHUB_REF_NAME }
+          if ($ref -notmatch '^v?(\d+(?:\.\d+)*)$') { throw "ref $ref n'est pas un tag version" }
+          $want = $Matches[1]
+          $cargo = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+          if (-not $cargo) { throw "version introuvable dans Cargo.toml" }
+          if ($cargo -ne $want) { throw "Cargo.toml ($cargo) != tag ($want) : release refusée" }
+          Write-Output "[ci] version OK : $cargo"
 
       # Même stratégie GTK que windows.yml : hôte GNU aligné sur MinGW UCRT64.
       - name: Install Rust stable GNU
@@ -214,8 +242,9 @@ jobs:
 
       # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
       # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
-      # Version = input `tag` du dispatch si fourni, sinon tag déclencheur
-      # sans le v initial, sinon 0.1.0.
+      # Version = input `tag` du dispatch, sinon tag déclencheur, sans le v
+      # initial. Les steps précédents garantissent un tag existant avec
+      # Cargo.toml à la même version ; tout autre cas échoue avant d'arriver ici.
       - name: Build MSI
         env:
           INPUT_TAG: ${{ inputs.tag }}
@@ -223,14 +252,12 @@ jobs:
           # et embarque uniquement le ZIP FFmpeg pinné vérifié.
           MR_FFMPEG_PINNED_ONLY: "1"
         run: |
-          $version = "0.1.0"
           $ref = $env:GITHUB_REF_NAME
           if ($env:INPUT_TAG) { $ref = $env:INPUT_TAG }
-          if ($ref -match '^v?(\d+(?:\.\d+)*)$') {
-            $parts = @($Matches[1] -split '\.')
-            while ($parts.Count -lt 3) { $parts += "0" }
-            $version = ($parts[0..2] -join ".")
-          }
+          if ($ref -notmatch '^v?(\d+(?:\.\d+)*)$') { throw "ref $ref n'est pas un tag version : MSI refusé" }
+          $parts = @($Matches[1] -split '\.')
+          while ($parts.Count -lt 3) { $parts += "0" }
+          $version = ($parts[0..2] -join ".")
           Write-Output "[ci] msi version=$version (ref=$ref)"
           powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/collect-runtime.ps1
           if ($LASTEXITCODE -ne 0) { throw "collect-runtime.ps1 exit $LASTEXITCODE (stage partiel refusé)" }
@@ -240,11 +267,44 @@ jobs:
           light -ext WixUIExtension -sice:ICE38 -sice:ICE43 -sice:ICE64 -o "MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
           Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
 
+      # Le MSI publié est exactement celui testé ici : installation
+      # silencieuse per-user, lancement de l'exe installé avec --help SANS
+      # ucrt64/bin au PATH (la closure embarquée doit suffire), ffmpeg
+      # embarqué fonctionnel, puis désinstallation. Mêmes contrôles que
+      # windows.yml : un MSI incomplet ne doit jamais atteindre la release.
+      - name: Test MSI per-user (celui qui sera publié)
+        run: |
+          $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
+          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$log`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
+            throw "msiexec /i exit $($install.ExitCode)"
+          }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
+          $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
+          if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
+          if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt" }
+          Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
+          $ffExe = Join-Path (Split-Path $exe -Parent) "ffmpeg.exe"
+          if (-not (Test-Path -LiteralPath $ffExe)) { throw "ffmpeg.exe embarqué introuvable : $ffExe" }
+          $ffOut = & $ffExe -version 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe embarqué -version exit $LASTEXITCODE" }
+          if (-not $ffOut) { throw "ffmpeg.exe embarqué -version sans sortie (binaire corrompu ?)" }
+          $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }
+
       - name: Upload MSI Windows x86_64
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-msi
           if-no-files-found: error
+          # Intermediaire : le job `release` publie le MSI en Release GitHub.
+          retention-days: 3
           path: packaging/windows/*.msi
 
   release:
@@ -261,6 +321,9 @@ jobs:
 
       # Le MSI embarque tout (exe + ORT + MinGW + closure GTK + ffmpeg) et
       # remplace les anciens assets loose (exe + DLLs + script d'install).
+      # L'artefact publié est le MSI du job build, téléchargé tel quel
+      # (celui qui vient d'être testé : install + exe + ffmpeg + uninstall),
+      # jamais reconstruit : le MSI publié est exactement celui qui a été testé.
       - name: Publie la release GitHub
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:

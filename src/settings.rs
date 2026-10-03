@@ -28,7 +28,7 @@ fn save(key: &str, value: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, settings.to_string());
+    let _ = crate::meeting::atomic_write(&path, settings.to_string().as_bytes());
 }
 
 pub fn load_format() -> Format {
@@ -78,4 +78,16 @@ pub fn bar_widget_offered() -> bool {
 
 pub fn set_bar_widget_offered() {
     save("bar_widget_offered", "yes");
+}
+
+/// The saved capture device for `which` (e.g. "mic" or "loopback"): the
+/// stable WASAPI endpoint id, never the friendly name.
+pub fn load_capture_device(which: &str) -> Option<String> {
+    let settings = load();
+    let key = format!("capture_device_{which}");
+    settings[key.as_str()]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }

@@ -12,12 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-pub const RATE: u32 = 48_000;
-pub const CHANNELS: u32 = 2;
+use super::{CHANNELS, HISTORY, RATE};
+
 /// 20 ms of s16le audio.
 const CHUNK_BYTES: usize = (RATE / 50 * 2 * CHANNELS) as usize;
-/// Three seconds of 20 ms peaks.
-pub const HISTORY: usize = 150;
 const FLOOR_DB: f64 = -60.0;
 
 struct Inner {
@@ -25,6 +23,17 @@ struct Inner {
     file: Option<BufWriter<File>>,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
+    /// First write/flush/sync failure step (`None` while writing fine):
+    /// kept, surfaced by `stop_recording`, and polled from the UI thread to
+    /// warn instead of claiming a clean recording. Set on the capture thread.
+    write_error: Option<String>,
+}
+
+/// Keeps only the first write failure, so the root cause survives later noise.
+fn note_write_error(inner: &mut Inner, context: &str, message: String) {
+    if inner.write_error.is_none() {
+        inner.write_error = Some(format!("{context}: {message}"));
+    }
 }
 
 #[derive(Clone)]
@@ -39,6 +48,7 @@ impl Source {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
             paused: false,
+            write_error: None,
         }));
         let shared = inner.clone();
         thread::spawn(move || {
@@ -57,6 +67,7 @@ impl Source {
         let mut inner = self.inner.lock().unwrap();
         inner.file = Some(file);
         inner.paused = false;
+        inner.write_error = None;
         Ok(())
     }
 
@@ -64,10 +75,32 @@ impl Source {
         self.inner.lock().unwrap().paused = paused;
     }
 
-    pub fn stop_recording(&self) {
-        if let Some(mut file) = self.inner.lock().unwrap().file.take() {
-            let _ = file.flush();
+    /// Flushes and syncs the file, then reports the first write failure if
+    /// any (kept from the capture thread). The flush/sync run OUTSIDE the
+    /// lock so the meters never block on the disk.
+    pub fn stop_recording(&self) -> std::io::Result<()> {
+        let write_error = self.inner.lock().unwrap().write_error.take();
+        let file = self.inner.lock().unwrap().file.take();
+        let mut error = write_error;
+        if let Some(mut file) = file {
+            if let Err(e) = file.flush() {
+                error = error.or(Some(format!("flush: {e}")));
+            }
+            if let Err(e) = file.get_ref().sync_data() {
+                error = error.or(Some(format!("sync: {e}")));
+            }
         }
+        match error {
+            Some(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message)),
+            None => Ok(()),
+        }
+    }
+
+    /// The first write/flush/sync failure step, if the recording degraded.
+    /// `None` while writing fine. Polled from the UI thread to warn instead
+    /// of claiming a clean recording.
+    pub fn write_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().write_error.clone()
     }
 
     pub fn levels(&self) -> Vec<f32> {
@@ -104,7 +137,11 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     else {
         return;
     };
-    let mut stdout = child.stdout.take().expect("piped stdout");
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
     let mut buf = vec![0u8; CHUNK_BYTES];
     // So a crash loses at most a second: flush every second, and push it to
     // the disk itself every half minute in case the machine goes down too.
@@ -122,15 +159,35 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         let mut inner = shared.lock().unwrap();
         inner.levels.pop_front();
         inner.levels.push_back(peak);
-        if !inner.paused
-            && let Some(file) = inner.file.as_mut()
-        {
-            let _ = file.write_all(&buf);
-            if chunks.is_multiple_of(50) {
-                let _ = file.flush();
+        // Paused, not recording, or already failed: skip the write but keep
+        // parec open and the meters alive (`continue`, NEVER `return`).
+        if inner.paused || inner.file.is_none() {
+            continue;
+        }
+        if let Some(file) = inner.file.as_mut() {
+            if let Err(e) = file.write_all(&buf) {
+                note_write_error(&mut inner, "write", e.to_string());
+                continue;
             }
-            if chunks.is_multiple_of(1500) {
-                let _ = file.get_ref().sync_data();
+            if chunks.is_multiple_of(50) {
+                if let Err(e) = file.flush() {
+                    note_write_error(&mut inner, "flush", e.to_string());
+                }
+            }
+        }
+        // Sync disque toutes les 30 s, HORS verrou via un clone du File.
+        let sync_clone = if chunks.is_multiple_of(1500) {
+            inner
+                .file
+                .as_ref()
+                .and_then(|file| file.get_ref().try_clone().ok())
+        } else {
+            None
+        };
+        drop(inner);
+        if let Some(file) = sync_clone {
+            if let Err(e) = file.sync_data() {
+                note_write_error(&mut shared.lock().unwrap(), "sync", e.to_string());
             }
         }
     }

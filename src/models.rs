@@ -16,6 +16,10 @@ use crate::transcribe::{Abort, Events, download};
 
 pub const DEFAULT: &str = "large-v3-turbo";
 
+// Pinned Hugging Face revision, verified on 2026-10-03 with the ggml files
+// present; bump only via PR so an upstream change never reaches the app unseen.
+pub const WHISPER_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+
 pub struct Model {
     pub name: &'static str,
     /// Download size in MB, for the text in the app.
@@ -172,7 +176,7 @@ pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
     };
     let target = platform::models_dir().join(file_name(model));
     let url = format!(
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/{WHISPER_REVISION}/{}",
         file_name(model)
     );
     download(

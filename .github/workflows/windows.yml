@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Un push annule le run precedent de la meme ref (package MSI couteux).
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
@@ -190,6 +195,11 @@ jobs:
       # Rustfmt bloquant (~10 s) : attrape le code non formaté avant review.
       - name: Format rustfmt (bloquant)
         run: cargo fmt --all -- --check
+
+      # Scoring du bench (déterministe, stdlib seule) : tokenisation, WER/CER,
+      # speaker error, réponses courtes, seuils. Sans binaire ni modèles.
+      - name: Bench scoring tests (déterministe)
+        run: python bench/tests.py
 
       # Contrôle sur le lock commité.
       - name: Check
@@ -406,6 +416,7 @@ jobs:
         with:
           name: msi-stage
           if-no-files-found: warn
+          retention-days: 7
           path: packaging/windows/stage/
 
       - name: Upload MSI Windows x86_64
@@ -413,4 +424,5 @@ jobs:
         with:
           name: windows-msi
           if-no-files-found: error
+          retention-days: 14
           path: packaging/windows/*.msi

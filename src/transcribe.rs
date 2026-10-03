@@ -10,7 +10,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -56,6 +55,32 @@ pub type Abort = Arc<AtomicBool>;
 
 pub const CANCELLED: &str = "transcription cancelled";
 
+/// Only one heavy job (transcription, diarization) runs at a time: whisper
+/// and the speaker model each take most of the CPU and memory.
+static HEAVY_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn acquire_heavy_slot(
+    events: &Events,
+    abort: &Abort,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    emit(
+        events,
+        Event::Stage("Waiting for the transcription slot…".into()),
+    );
+    loop {
+        if abort.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        match HEAVY_SLOT.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub start_ms: i64,
@@ -69,6 +94,8 @@ pub struct Transcript {
     /// The language used or detected, as a whisper code.
     pub language: String,
     pub duration_secs: i64,
+    /// Speaker separation failed, but the text is still usable; the UI must warn.
+    pub diarization_failed: bool,
 }
 
 fn emit(events: &Events, event: Event) {
@@ -82,6 +109,10 @@ fn emit(events: &Events, event: Event) {
 /// format (s16le, 48 kHz, stereo); anything else is decoded by ffmpeg.
 pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
     if path.extension().is_some_and(|e| e == "raw") {
+        match decode_raw_with_ffmpeg(path) {
+            Ok(track) => return Ok(track),
+            Err(e) => eprintln!("{APP_NAME}: {e}; falling back to the built-in reader"),
+        }
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let frame = 2 * CHANNELS as usize;
         let mono: Vec<f32> = bytes
@@ -102,8 +133,50 @@ pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
     }
 }
 
+fn decode_raw_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
+    let output = crate::platform::silent_command(crate::export::ffmpeg())
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            &RATE.to_string(),
+            "-ac",
+            &CHANNELS.to_string(),
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            &WHISPER_RATE.to_string(),
+            "-",
+        ])
+        .output()
+        .map_err(|e| format!("could not run ffmpeg: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffmpeg could not decode {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect())
+}
+
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let mut child = crate::platform::silent_command(crate::export::ffmpeg())
+    let output = crate::platform::silent_command(crate::export::ffmpeg())
         .args(["-nostdin", "-loglevel", "error", "-i"])
         .arg(path)
         .args([
@@ -115,18 +188,8 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
             &WHISPER_RATE.to_string(),
             "-",
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .map_err(|e| format!("could not run ffmpeg: {e}"))?;
-    let mut bytes = Vec::new();
-    child
-        .stdout
-        .take()
-        .expect("piped stdout")
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(format!(
             "ffmpeg could not decode {}: {}",
@@ -134,7 +197,8 @@ fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(bytes
+    Ok(output
+        .stdout
         .as_chunks::<4>()
         .0
         .iter()
@@ -468,11 +532,30 @@ pub fn download(
     events: &Events,
     abort: &Abort,
 ) -> Result<(), String> {
+    let valid = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() >= min_bytes);
+    if valid(target) {
+        return Ok(());
+    }
     let dir = target.parent().expect("model path has a parent");
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut part = target.as_os_str().to_owned();
-    part.push(".part");
-    let part = PathBuf::from(part);
+    // Unique per attempt so two downloaders never share a temp file: process
+    // id + nanos + a per-process counter, created exclusively.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_owned());
+    let part = dir.join(format!(
+        ".{name}.part-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        seq
+    ));
     emit(events, Event::Stage(label.to_owned()));
 
     let response = ureq::get(url)
@@ -480,7 +563,13 @@ pub fn download(
         .map_err(|e| format!("could not download {url}: {e}"))?;
     let total = response.body().content_length();
     let mut reader = response.into_body().into_reader();
-    let mut file = BufWriter::new(File::create(&part).map_err(|e| e.to_string())?);
+    let mut file = BufWriter::new(
+        File::options()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+            .map_err(|e| e.to_string())?,
+    );
     let mut buf = vec![0u8; 1 << 16];
     let (mut done, mut last_pct) = (0u64, u64::MAX);
     loop {
@@ -507,12 +596,26 @@ pub fn download(
         }
     }
     file.flush().map_err(|e| e.to_string())?;
+    file.get_ref().sync_data().map_err(|e| e.to_string())?;
     drop(file);
     if total.is_some_and(|t| t != done) || done < min_bytes {
         let _ = std::fs::remove_file(&part);
+        if valid(target) {
+            // Another downloader filled the target in the meantime.
+            return Ok(());
+        }
         return Err(format!("the download of {url} was incomplete"));
     }
-    std::fs::rename(&part, target).map_err(|e| e.to_string())
+    match std::fs::rename(&part, target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            if valid(target) {
+                return Ok(());
+            }
+            Err(e.to_string())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +629,7 @@ pub fn transcribe(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    let _slot = acquire_heavy_slot(events, abort)?;
     let duration_secs = (mic.len().max(computer.len()) / WHISPER_RATE) as i64;
     let empty = |language: &str| Transcript {
         segments: Vec::new(),
@@ -535,6 +639,7 @@ pub fn transcribe(
             language.to_owned()
         },
         duration_secs,
+        diarization_failed: false,
     };
     if is_silent(mic) && is_silent(computer) {
         emit(events, Event::Progress(1.0));
@@ -554,15 +659,18 @@ pub fn transcribe(
     // Several voices on one side are told apart: people sharing your mic, or
     // several people on the other end of the call. On the mic only your own
     // stretches count, so the other side leaking in is not taken for a person
-    // in the room.
-    let local = voices(&only(&mic, &mic_regions), events, abort)?;
+    // in the room. The speaker model is loaded once for both sides.
+    let mut speaker_model: Option<crate::nemotron::Model> = None;
+    let (local, local_failed) =
+        voices(&only(&mic, &mic_regions), &mut speaker_model, events, abort)?;
     // Echo that got past the level check can still come out as a voice of
     // its own; its lines are dropped after the mic's pass.
     let (local, echo) = split_echo(
         local,
         &active_frames(&computer, computer.len().div_ceil(FRAME)),
     );
-    let remote = voices(&computer, events, abort)?;
+    let (remote, remote_failed) = voices(&computer, &mut speaker_model, events, abort)?;
+    let diarization_failed = local_failed || remote_failed;
     let context = load_whisper(events, abort)?;
 
     let length = |regions: &[Region]| regions.iter().map(|r| r.end - r.start).sum::<usize>();
@@ -618,6 +726,7 @@ pub fn transcribe(
             language
         },
         duration_secs,
+        diarization_failed,
     })
 }
 
@@ -653,13 +762,12 @@ fn interleave(mut sentences: Vec<Segment>) -> Vec<Segment> {
             .collect();
         let own = trigrams(&own_words);
         if own.is_empty() {
-            // A few words: an echo when they come back word for word.
-            return !own_words.is_empty()
-                && near.iter().any(|theirs| {
-                    theirs
-                        .windows(own_words.len())
-                        .any(|w| w == own_words.as_slice())
-                });
+            // One or two words ("Oui.", "D'accord."): a short reply is not
+            // provably an echo. Text similarity alone cannot tell "you
+            // answering the same word" from "their voice leaking into your
+            // mic", so keep the line instead of deleting a real answer.
+            // Echo suppression only applies to longer phrases below.
+            return false;
         }
         let theirs: std::collections::HashSet<String> =
             near.iter().flat_map(|w| trigrams(w)).collect();
@@ -759,22 +867,46 @@ fn only(track: &[f32], regions: &[Region]) -> Vec<f32> {
 
 /// Who is who on one side of a recording: the turns when more than one voice
 /// is heard there, nothing when it is one person. A missing speaker model is
-/// no reason to fail the transcript; the side then stays one speaker.
+/// no reason to fail the transcript; the side then stays one speaker and the
+/// returned flag tells the transcript that the separation failed. The model
+/// is loaded once and shared between both sides.
 fn voices(
     track: &[f32],
+    model: &mut Option<crate::nemotron::Model>,
     events: &Events,
     abort: &Abort,
-) -> Result<Vec<crate::diarize::Turn>, String> {
+) -> Result<(Vec<crate::diarize::Turn>, bool), String> {
     if is_silent(track) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
-    match crate::diarize::turns(track, None, events, abort) {
-        Ok(turns) if turns.iter().any(|t| t.speaker > 0) => Ok(turns),
-        Ok(_) => Ok(Vec::new()),
+    if model.is_none() {
+        match crate::nemotron::ensure(events, abort)
+            .and_then(|path| crate::nemotron::Model::load(&path))
+        {
+            Ok(loaded) => *model = Some(loaded),
+            Err(e) if e == CANCELLED => return Err(e),
+            Err(e) => {
+                eprintln!("{}: telling voices apart: {e}", crate::APP_NAME);
+                return Ok((Vec::new(), true));
+            }
+        }
+    }
+    // `diarize::turns_loaded` runs on the already loaded model, so the model
+    // stays shared between both sides instead of reloading per side.
+    let Some(loaded) = model.as_mut() else {
+        eprintln!(
+            "{}: telling voices apart: missing speaker model",
+            crate::APP_NAME
+        );
+        return Ok((Vec::new(), true));
+    };
+    match crate::diarize::turns_loaded(loaded, track, None, events, abort) {
+        Ok(turns) if turns.iter().any(|t| t.speaker > 0) => Ok((turns, false)),
+        Ok(_) => Ok((Vec::new(), false)),
         Err(e) if e == CANCELLED => Err(e),
         Err(e) => {
             eprintln!("{}: telling voices apart: {e}", crate::APP_NAME);
-            Ok(Vec::new())
+            Ok((Vec::new(), true))
         }
     }
 }
@@ -790,6 +922,7 @@ pub fn transcribe_single(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    let _slot = acquire_heavy_slot(events, abort)?;
     let duration_secs = (track.len() / WHISPER_RATE) as i64;
     let empty = || Transcript {
         segments: Vec::new(),
@@ -799,6 +932,7 @@ pub fn transcribe_single(
             language.to_owned()
         },
         duration_secs,
+        diarization_failed: false,
     };
     if is_silent(track) {
         emit(events, Event::Progress(1.0));
@@ -813,14 +947,14 @@ pub fn transcribe_single(
     // Speakers first, so the live lines can already say who is talking.
     // A missing speaker model is no reason to fail the transcript (same
     // fallback as `voices` for recordings); the file then stays one speaker.
-    let turns = match speakers {
-        Some(1) => crate::diarize::single(track),
+    let (turns, diarization_failed) = match speakers {
+        Some(1) => (crate::diarize::single(track), false),
         _ => match crate::diarize::turns(track, speakers, events, abort) {
-            Ok(turns) => turns,
+            Ok(turns) => (turns, false),
             Err(e) if e == CANCELLED => return Err(e),
             Err(e) => {
                 eprintln!("{}: telling voices apart: {e}", crate::APP_NAME);
-                crate::diarize::single(track)
+                (crate::diarize::single(track), true)
             }
         },
     };
@@ -831,6 +965,7 @@ pub fn transcribe_single(
         &speakers,
         language,
         duration_secs,
+        diarization_failed,
         events,
         abort,
     )
@@ -843,6 +978,7 @@ fn whisper_pass(
     speakers: &Speakers,
     language: &str,
     duration_secs: i64,
+    diarization_failed: bool,
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
@@ -867,6 +1003,7 @@ fn whisper_pass(
             language.to_owned()
         },
         duration_secs,
+        diarization_failed,
     })
 }
 
@@ -1536,8 +1673,6 @@ mod tests {
                 "The review is still pending after four days.",
             ),
             line(300, "You", "review is still pending after four"),
-            line(9000, "Remote 1", "Sounds good."),
-            line(9100, "You", "Sounds good."),
             // The same words much later are yours.
             line(30_000, "You", "The review is still pending, I see."),
         ]);
@@ -1547,5 +1682,25 @@ mod tests {
             .map(|s| s.text.as_str())
             .collect();
         assert_eq!(yours, ["The review is still pending, I see."]);
+    }
+
+    #[test]
+    fn short_identical_replies_are_kept() {
+        let out = interleave(vec![
+            line(
+                0,
+                "Remote 1",
+                "The review is still pending after four days.",
+            ),
+            line(300, "You", "review is still pending after four"),
+        ]);
+        assert!(out.iter().all(|s| s.speaker != "You"));
+        let out = interleave(vec![
+            line(0, "Remote", "Oui."),
+            line(900, "You", "Oui."),
+            line(20_000, "Remote", "D'accord."),
+            line(20_900, "You", "D'accord."),
+        ]);
+        assert_eq!(out.len(), 4);
     }
 }

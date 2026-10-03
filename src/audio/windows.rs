@@ -13,12 +13,15 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{CHANNELS, HISTORY, RATE};
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta};
+use wasapi::{
+    AudioCaptureClient, AudioClient, DeviceEnumerator, DeviceEventCallbacks, Direction, Handle,
+    Role, SampleType, StreamMode, WaveFormat, initialize_mta,
+};
 
 /// 20 ms of s16le audio.
 const CHUNK_BYTES: usize = (RATE / 50 * 2 * CHANNELS) as usize;
@@ -35,6 +38,91 @@ struct Inner {
     /// Last init failure step (`None` while capturing fine): polled by the UI
     /// to warn instead of recording silence. Set on the capture thread.
     error: Option<String>,
+    /// First write/flush/sync failure (`None` while writing fine): kept,
+    /// surfaced by `stop_recording`, and polled from the UI thread to warn
+    /// instead of claiming a clean recording. Set on the capture thread.
+    write_error: Option<String>,
+    /// Session clock across reopens: when the last chunk was emitted. Used to
+    /// fill the gap with silence so the timeline survives device changes.
+    last_emit: Option<Instant>,
+    /// The endpoint actually being captured (item 7): filled at open time.
+    endpoint: Option<CapturedEndpoint>,
+}
+
+/// Keeps only the first write failure, so the root cause survives later noise.
+fn note_write_error(inner: &mut Inner, context: &str, message: String) {
+    if inner.write_error.is_none() {
+        inner.write_error = Some(format!("{context}: {message}"));
+    }
+}
+
+/// The endpoint actually captured (item 7), shown in the UI meter tooltips.
+#[derive(Clone, Debug)]
+pub struct CapturedEndpoint {
+    pub id: String,
+    pub friendlyname: String,
+    pub direction: String,
+    pub role: String,
+    pub state: String,
+}
+
+/// Which endpoint a `Source` captures (item 7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Follows the WASAPI default for (`dir`, `role`): reopens when that
+    /// default changes or when the currently captured endpoint moves.
+    FollowDefault { dir: Direction, role: Role },
+    /// Pinned endpoint (stable id from the settings): reopens only on it.
+    Fixed { id: String },
+}
+
+/// The capture direction for a `Source::spawn` device name:
+/// `@DEFAULT_MONITOR@` loops back the default render endpoint, anything else
+/// (`@DEFAULT_SOURCE@` included) captures the default microphone.
+fn expected_dir(device: &str) -> Direction {
+    if device == "@DEFAULT_MONITOR@" {
+        Direction::Render
+    } else {
+        Direction::Capture
+    }
+}
+
+/// Pure helper: a pinned id (stable, never the friendly name) wins over the
+/// default; an empty/missing pin follows the `Console` default.
+fn target_for_device(device: &str, pinned: Option<&str>) -> Target {
+    match pinned.filter(|id| !id.trim().is_empty()) {
+        Some(id) => Target::Fixed { id: id.to_owned() },
+        None => Target::FollowDefault {
+            dir: expected_dir(device),
+            role: Role::Console,
+        },
+    }
+}
+
+/// Endpoint notification relayed by `mpsc` from the WASAPI callbacks (which
+/// must never call back into the `DeviceEnumerator`).
+#[derive(Clone, Debug)]
+enum EndpointNotice {
+    DefaultChanged { dir: Direction, role: Role },
+    DeviceChanged(String),
+}
+
+/// Pure helper: does this notice concern our target?
+/// - `FollowDefault` reopens only on its own default (`dir` + `role`) or on
+///   the currently captured endpoint id;
+/// - `Fixed` reopens only on its pinned id.
+fn should_reopen(target: &Target, notice: &EndpointNotice, current_id: Option<&str>) -> bool {
+    match (target, notice) {
+        (
+            Target::FollowDefault { dir, role },
+            EndpointNotice::DefaultChanged { dir: d, role: r },
+        ) => dir == d && role == r,
+        (Target::FollowDefault { .. }, EndpointNotice::DeviceChanged(id)) => {
+            current_id == Some(id.as_str())
+        }
+        (Target::Fixed { id }, EndpointNotice::DeviceChanged(changed)) => id == changed,
+        (Target::Fixed { .. }, EndpointNotice::DefaultChanged { .. }) => false,
+    }
 }
 
 #[derive(Clone)]
@@ -52,14 +140,13 @@ impl Source {
             file: None,
             paused: false,
             error: None,
+            write_error: None,
+            last_emit: None,
+            endpoint: None,
         }));
         let shared = inner.clone();
         thread::spawn(move || {
-            loop {
-                capture(device, &shared);
-                // parec quitte quand le device disparaît ; on rouvre pareil.
-                thread::sleep(Duration::from_secs(1));
-            }
+            endpoint_loop(device, &shared);
         });
         Source { inner }
     }
@@ -70,6 +157,7 @@ impl Source {
         let mut inner = self.inner.lock().unwrap();
         inner.file = Some(file);
         inner.paused = false;
+        inner.write_error = None;
         Ok(())
     }
 
@@ -77,10 +165,30 @@ impl Source {
         self.inner.lock().unwrap().paused = paused;
     }
 
-    pub fn stop_recording(&self) {
-        if let Some(mut file) = self.inner.lock().unwrap().file.take() {
-            let _ = file.flush();
+    pub fn stop_recording(&self) -> std::io::Result<()> {
+        let write_error = self.inner.lock().unwrap().write_error.take();
+        let file = self.inner.lock().unwrap().file.take();
+        // Flush + sync HORS verrou (guards droppés) : les vumètres ne
+        // bloquent jamais sur le disque.
+        let mut error = write_error;
+        if let Some(mut file) = file {
+            if let Err(e) = file.flush() {
+                error = error.or(Some(format!("flush: {e}")));
+            }
+            if let Err(e) = file.get_ref().sync_data() {
+                error = error.or(Some(format!("sync: {e}")));
+            }
         }
+        match error {
+            Some(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message)),
+            None => Ok(()),
+        }
+    }
+
+    /// The first write/flush/sync failure step, if the recording degraded.
+    /// `None` while writing fine. Clone sous mutex, jamais de bloc.
+    pub fn write_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().write_error.clone()
     }
 
     pub fn levels(&self) -> Vec<f32> {
@@ -104,6 +212,12 @@ impl Source {
     /// fine. Polled from the UI thread to warn instead of recording silence.
     pub fn init_error(&self) -> Option<String> {
         self.inner.lock().unwrap().error.clone()
+    }
+
+    /// The endpoint actually captured (item 7). `None` before the first open.
+    /// Clone sous mutex, jamais de bloc.
+    pub fn endpoint(&self) -> Option<CapturedEndpoint> {
+        self.inner.lock().unwrap().endpoint.clone()
     }
 }
 
@@ -219,7 +333,7 @@ impl MixDesc {
             Err(_) => match bits {
                 16 => (SampleKind::I16, true),
                 24 => (SampleKind::I24, true),
-                _ => (SampleKind::F32, bits == 32),
+                _ => (SampleKind::F32, false),
             },
         };
         MixDesc {
@@ -264,9 +378,63 @@ fn frame_channel_f32(raw: &[u8], frame: usize, channel: usize, desc: &MixDesc) -
     }
 }
 
+fn missed_chunks(elapsed: Duration) -> u64 {
+    elapsed.as_millis() as u64 / 20
+}
+
+const MAX_PAD_BURST: u64 = 1500;
+
+/// Émet `n` chunks de silence (zéros) : niveaux + horloge via `push_chunk`.
+fn pad_silence(shared: &Mutex<Inner>, chunks: &mut u64, n: u64) {
+    for _ in 0..n {
+        push_chunk(shared, &[0u8; CHUNK_BYTES], chunks);
+    }
+}
+
+/// Comble le gap depuis le dernier chunk émis (cappé à `MAX_PAD_BURST`) :
+/// la timeline survit aux réveils tardifs et aux réouvertures. Initialise
+/// l'horloge au premier appel (aucun chunk émis : aucun gap à combler).
+fn pad_missed(device: &str, shared: &Mutex<Inner>, chunks: &mut u64) {
+    // Copie hors verrou : le garde est droppé avant tout re-lock.
+    let last = shared.lock().unwrap().last_emit;
+    let elapsed = match last {
+        Some(t) => t.elapsed(),
+        None => {
+            shared.lock().unwrap().last_emit = Some(Instant::now());
+            Duration::ZERO
+        }
+    };
+    let n = missed_chunks(elapsed).min(MAX_PAD_BURST);
+    if n > 0 {
+        debug_log(device, &format!("pad missed={n}"));
+        pad_silence(shared, chunks, n);
+    }
+}
+
+fn downmix_samples(native: &[f32; 8]) -> (f32, f32) {
+    const CENTER: f32 = 0.707;
+    let left = native[0] + CENTER * native[2] + CENTER * native[4] + CENTER * native[6];
+    let right = native[1] + CENTER * native[2] + CENTER * native[5] + CENTER * native[7];
+    let peak = left.abs().max(right.abs()).max(1.0);
+    (
+        (left / peak).clamp(-1.0, 1.0),
+        (right / peak).clamp(-1.0, 1.0),
+    )
+}
+
 /// Convertit des paquets natifs vers s16le 48 kHz stéréo (resample linéaire
-/// simple, sans dépendance supplémentaire). Mono dupliqué ; au-delà de
-/// 2 canaux, on garde les deux premiers (FL/FR).
+/// simple, sans dépendance supplémentaire).
+///
+/// Mapping des canaux natifs (ordre WAVEFORMATEXTENSIBLE) :
+/// - 1 canal : mono dupliqué sur L/R ;
+/// - 2 canaux : stéréo direct (FL/FR) ;
+/// - 6 canaux (5.1 : FL FR FC LFE BL BR) et 8 canaux (7.1 : +SL SR) :
+///   downmix via [`downmix_samples`] (centre et surrounds à 0.707 des deux
+///   côtés, canal 3 LFE ignoré, normalisation anti-saturation) ;
+/// - 3, 4, 5, 7 canaux ou plus de 8 : repli raisonnable, les 8 premiers
+///   canaux dans le même mapping (le canal 3 reste ignoré comme un LFE).
+/// Limite connue : en quad (4 canaux : FL FR BL BR), les indices 2/3 ne sont
+/// pas un centre/LFE mais sont mixés comme tels.
 struct Converter {
     desc: MixDesc,
     /// Retard fractionnaire (en frames source) reporté au paquet suivant,
@@ -294,15 +462,31 @@ impl Converter {
             }
             let frac = (src - i0 as f64) as f32;
             let i1 = (i0 + 1).min(frames_in - 1);
-            for out_ch in 0..2 {
-                let in_ch = if channels == 1 {
-                    0
-                } else {
-                    out_ch.min(channels - 1)
-                };
-                let a = frame_channel_f32(raw, i0, in_ch, &self.desc);
-                let b = frame_channel_f32(raw, i1, in_ch, &self.desc);
-                let v = (a + (b - a) * frac).clamp(-1.0, 1.0);
+            // Échantillon natif interpolé par canal (canal 3 = LFE : zéros).
+            let sample = |channel: usize| {
+                if channel == 3 {
+                    return 0.0;
+                }
+                let a = frame_channel_f32(raw, i0, channel, &self.desc);
+                let b = frame_channel_f32(raw, i1, channel, &self.desc);
+                (a + (b - a) * frac).clamp(-1.0, 1.0)
+            };
+            let (left, right) = if channels == 1 {
+                // Mono dupliqué.
+                let v = sample(0);
+                (v, v)
+            } else if channels == 2 {
+                // Stéréo direct.
+                (sample(0), sample(1))
+            } else {
+                // 5.1/7.1 (et repli au-delà) : downmix centro-surrounds.
+                let mut native = [0.0f32; 8];
+                for (i, v) in native.iter_mut().enumerate().take(channels.min(8)) {
+                    *v = sample(i);
+                }
+                downmix_samples(&native)
+            };
+            for v in [left, right] {
                 let s = (v * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
                 out.extend_from_slice(&s.to_le_bytes());
             }
@@ -330,50 +514,169 @@ fn push_chunk(shared: &Mutex<Inner>, chunk: &[u8], chunks: &mut u64) {
         .max()
         .unwrap_or(0) as f32
         / 32768.0;
+    let now = Instant::now();
+    // UN verrou court : niveaux + horloge session.
     let mut inner = shared.lock().unwrap();
     inner.levels.pop_front();
     inner.levels.push_back(peak);
-    if !inner.paused
-        && let Some(file) = inner.file.as_mut()
-    {
-        let _ = file.write_all(chunk);
+    inner.last_emit = Some(now);
+    // En pause : niveaux seuls, rien n'est écrit.
+    if inner.paused || inner.file.is_none() {
+        return;
+    }
+    if let Some(file) = inner.file.as_mut() {
+        if let Err(e) = file.write_all(chunk) {
+            note_write_error(&mut inner, "write", e.to_string());
+            return;
+        }
         // Comme sur Linux : au plus une seconde perdue en cas de crash,
         // sync disque toutes les 30 s.
         if chunks.is_multiple_of(50) {
-            let _ = file.flush();
+            if let Err(e) = file.flush() {
+                note_write_error(&mut inner, "flush", e.to_string());
+            }
         }
-        if chunks.is_multiple_of(1500) {
-            let _ = file.get_ref().sync_data();
+    }
+    // Sync disque HORS verrou via un clone du File.
+    let sync_clone = if chunks.is_multiple_of(1500) {
+        inner
+            .file
+            .as_ref()
+            .and_then(|file| file.get_ref().try_clone().ok())
+    } else {
+        None
+    };
+    drop(inner);
+    if let Some(file) = sync_clone {
+        if let Err(e) = file.sync_data() {
+            note_write_error(&mut shared.lock().unwrap(), "sync", e.to_string());
         }
     }
 }
 
-fn capture(device: &str, shared: &Mutex<Inner>) {
+/// Flux ouvert sur la cible : client WASAPI + capture + format.
+struct OpenStream {
+    client: AudioClient,
+    capture: AudioCaptureClient,
+    event: Option<Handle>,
+    desc: MixDesc,
+    current_id: Option<String>,
+}
+
+/// Un thread par `Source` (item 7) : UN `DeviceEnumerator` + UN
+/// `register_notification_callback` vivants tant que le thread vit. Les
+/// callbacks ne font que relayer par `mpsc` (JAMAIS d'appel enumerator
+/// dedans : le système audio les exécute sur son propre thread) ; ce thread
+/// re-résout la cible puis stoppe et ré-init le flux, avec debounce. Le gap
+/// est conservé via `Inner::last_emit` (comblé en zéros à la réouverture).
+fn endpoint_loop(device: &str, shared: &Mutex<Inner>) {
     // COM MTA pour ce thread (inutile mais inoffensif si déjà initialisé).
     let _ = initialize_mta();
+    // La cible ne change pas pendant la vie du thread : pin stable en
+    // settings (`Fixed`) ou suivi du default (`FollowDefault`).
+    let slot = if device == "@DEFAULT_MONITOR@" {
+        "system"
+    } else {
+        "mic"
+    };
+    let target = target_for_device(
+        device,
+        crate::settings::load_capture_device(slot).as_deref(),
+    );
+    let mut chunks: u64 = 0;
+    // parec quitte quand le device disparaît ; on rouvre pareil :
+    // l'enumerator est recréé si sa création échoue, sinon il vit pour tout
+    // le thread.
+    loop {
+        let enumerator = match DeviceEnumerator::new() {
+            Ok(enumerator) => enumerator,
+            Err(_) => {
+                init_failed(device, "enumerator", shared);
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        let (tx, rx) = mpsc::channel::<EndpointNotice>();
+        let mut callbacks = DeviceEventCallbacks::new();
+        let tx_default = tx.clone();
+        callbacks.set_default_device_callback(move |dir, role, _| {
+            let _ = tx_default.send(EndpointNotice::DefaultChanged { dir, role });
+        });
+        let tx_state = tx.clone();
+        callbacks.set_device_state_callback(move |id, _| {
+            let _ = tx_state.send(EndpointNotice::DeviceChanged(id));
+        });
+        let tx_added = tx.clone();
+        callbacks.set_device_added_callback(move |id| {
+            let _ = tx_added.send(EndpointNotice::DeviceChanged(id));
+        });
+        let tx_removed = tx;
+        callbacks.set_device_removed_callback(move |id| {
+            let _ = tx_removed.send(EndpointNotice::DeviceChanged(id));
+        });
+        // `_registration` garde les notifications actives jusqu'à la fin du
+        // thread ; sans lui, plus de réouverture sur changement de device.
+        let _registration = match enumerator.register_notification_callback(callbacks) {
+            Ok(registration) => registration,
+            Err(_) => {
+                init_failed(device, "register-notifications", shared);
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        loop {
+            match open_target(device, &enumerator, &target, shared, &mut chunks) {
+                Some(open) => {
+                    run_stream(device, &target, shared, &open, &rx, &mut chunks);
+                    // Debounce : les notifications arrivent en rafales, on
+                    // coalesce avant de re-résoudre.
+                    thread::sleep(Duration::from_millis(250));
+                    while rx.try_recv().is_ok() {}
+                }
+                None => {
+                    // Échec de résolution (`init_failed` déjà renseigné ;
+                    // `Fixed` supprimé → step explicite) : on garde la
+                    // timeline via le gap `last_emit`, puis on réessaie.
+                    pad_missed(device, shared, &mut chunks);
+                    thread::sleep(Duration::from_secs(1));
+                    while rx.try_recv().is_ok() {}
+                }
+            }
+        }
+    }
+}
+
+/// Résout la cible en endpoint WASAPI et ouvre le flux (item 7) :
+/// `get_device(&id)` si pin, sinon `get_default_device_for_role` (`Console`
+/// par défaut). Renseigne `Inner::endpoint` et comble le gap `last_emit`.
+/// `None` après `init_failed` (`Fixed` supprimé → step explicite + pad).
+fn open_target(
+    device: &str,
+    enumerator: &DeviceEnumerator,
+    target: &Target,
+    shared: &Mutex<Inner>,
+    chunks: &mut u64,
+) -> Option<OpenStream> {
     debug_log(device, &format!("start device={device}"));
 
-    // `@DEFAULT_MONITOR@` = loopback du rendu par défaut ; tout le reste
-    // (`@DEFAULT_SOURCE@` inclus) = capture micro par défaut.
     // NOTE wasapi 0.24 : plus de `get_default_device` libre ; on passe par
-    // `DeviceEnumerator`. Un nom explicite retombe sur le micro par défaut.
-    let default_dir = if device == "@DEFAULT_MONITOR@" {
-        Direction::Render
-    } else {
-        Direction::Capture
-    };
-    let enumerator = match DeviceEnumerator::new() {
-        Ok(enumerator) => enumerator,
-        Err(_) => {
-            init_failed(device, "enumerator", shared);
-            return;
-        }
-    };
-    let dev = match enumerator.get_default_device(&default_dir) {
-        Ok(dev) => dev,
-        Err(_) => {
-            init_failed(device, "default-device", shared);
-            return;
+    // `DeviceEnumerator`.
+    let (dev, direction, role) = match target {
+        Target::Fixed { id } => match enumerator.get_device(id) {
+            Ok(dev) => (dev, expected_dir(device).to_string(), "pinned".to_owned()),
+            Err(_) => {
+                init_failed(device, "device-removed", shared);
+                return None;
+            }
+        },
+        Target::FollowDefault { dir, role } => {
+            match enumerator.get_default_device_for_role(dir, role) {
+                Ok(dev) => (dev, dir.to_string(), role.to_string()),
+                Err(_) => {
+                    init_failed(device, "default-device", shared);
+                    return None;
+                }
+            }
         }
     };
     // Nom convivial wasapi 0.24 (`get_friendlyname`), repli ID (`get_id`) ;
@@ -385,11 +688,28 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             Err(_) => debug_log(device, "endpoint unknown"),
         },
     }
+    // Endpoint réellement capturé : id stable, nom convivial, direction,
+    // rôle, état (`get_state`). Lu par l'UI pour les tooltips des vumètres.
+    let id = dev.get_id().ok();
+    let friendly = dev
+        .get_friendlyname()
+        .unwrap_or_else(|_| id.clone().unwrap_or_else(|| "unknown".to_owned()));
+    let state = dev
+        .get_state()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| "unknown".to_owned());
+    shared.lock().unwrap().endpoint = Some(CapturedEndpoint {
+        id: id.clone().unwrap_or_default(),
+        friendlyname: friendly,
+        direction,
+        role,
+        state,
+    });
     let mut client = match dev.get_iaudioclient() {
         Ok(client) => client,
         Err(_) => {
             init_failed(device, "iaudioclient", shared);
-            return;
+            return None;
         }
     };
     // Format mix partagé : toujours accepté ; conversion logicielle derrière.
@@ -397,7 +717,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         Ok(mix) => mix,
         Err(_) => {
             init_failed(device, "mixformat", shared);
-            return;
+            return None;
         }
     };
     let desc = MixDesc::from_mix(&mix);
@@ -414,7 +734,7 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
     );
     if !desc.valid || desc.blockalign == 0 || desc.channels == 0 {
         init_failed(device, "desc-invalid", shared);
-        return;
+        return None;
     }
     let period = match client.get_device_period() {
         Ok((def, _)) if def > 0 => def,
@@ -435,36 +755,83 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         .is_err()
     {
         init_failed(device, "initialize-client", shared);
-        return;
+        return None;
     }
     let capture = match client.get_audiocaptureclient() {
         Ok(capture) => capture,
         Err(_) => {
             init_failed(device, "captureclient", shared);
-            return;
+            return None;
         }
     };
     let event = client.set_get_eventhandle().ok();
     if client.start_stream().is_err() {
         init_failed(device, "start-stream", shared);
-        return;
+        return None;
     }
     // Le flux tourne : un échec précédent est résorbé, l'UI n'a plus à prévenir.
     shared.lock().unwrap().error = None;
+    // (Ré)ouverture : comble le gap depuis le dernier chunk émis (cappé) —
+    // la timeline survit aux réouvertures.
+    pad_missed(device, shared, chunks);
 
-    let mut converter = Converter { desc, pos: 0.0 };
+    Some(OpenStream {
+        client,
+        capture,
+        event,
+        desc,
+        current_id: id,
+    })
+}
+
+/// Boucle de lecture d'un flux ouvert : draine les paquets, convertit,
+/// écrit par chunks de 20 ms et comble EXACTEMENT les chunks manqués.
+/// Sortie (après `stop_stream`) sur erreur de lecture ou sur notification
+/// d'endpoint qui concerne la cible : l'appelant re-résout et ré-init, le
+/// gap `last_emit` étant conservé.
+fn run_stream(
+    device: &str,
+    target: &Target,
+    shared: &Mutex<Inner>,
+    open: &OpenStream,
+    notices: &mpsc::Receiver<EndpointNotice>,
+    chunks: &mut u64,
+) {
+    let OpenStream {
+        client,
+        capture,
+        event,
+        desc,
+        current_id,
+    } = open;
+    let mut converter = Converter {
+        desc: *desc,
+        pos: 0.0,
+    };
     let mut pending: Vec<u8> = Vec::with_capacity(CHUNK_BYTES * 2);
     let mut raw = Vec::with_capacity(1 << 16);
-    let mut chunks: u64 = 0;
-    let mut last_emit = Instant::now();
     // Compteurs pour le log fichier toutes les 5 s (paquets lus, paquets
-    // flag silent, converter inactif). Remis à zéro à chaque log.
+    // flag silent, discontinuités, converter inactif). Remis à zéro à chaque log.
     let mut last_stats = Instant::now();
     let mut pkts_since: u64 = 0;
     let mut silent_since: u64 = 0;
+    let mut glitch_since: u64 = 0;
     let invalid = if desc.valid { 0 } else { 1 };
 
     loop {
+        // Notifications d'endpoints (relais mpsc, jamais d'enumerator dans
+        // le callback) : on ne rouvre que si notre cible est concernée.
+        let mut reopen = false;
+        while let Ok(notice) = notices.try_recv() {
+            if should_reopen(target, &notice, current_id.as_deref()) {
+                reopen = true;
+            }
+        }
+        if reopen {
+            debug_log(device, "endpoint changed, reopen");
+            let _ = client.stop_stream();
+            return;
+        }
         // Draine tous les paquets disponibles (GetBuffer/ReleaseBuffer via
         // le wrapper wasapi 0.24).
         loop {
@@ -512,6 +879,13 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
             if info.flags.silent {
                 silent_since += 1;
             }
+            if info.flags.data_discontinuity || info.flags.timestamp_error {
+                // Glitch de position/horloge : log + compteur (stats 5 s) +
+                // pad du gap éventuel pour garder la timeline.
+                glitch_since += 1;
+                debug_log(device, "buffer discontinuity, padding the gap");
+                pad_missed(device, shared, chunks);
+            }
             // AUDCLNT_BUFFERFLAGS_SILENT : le moteur signale un paquet
             // silencieux (loopback sans son) ; le contenu est indéfini,
             // on le remplace par des zéros.
@@ -526,29 +900,44 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
 
         while pending.len() >= CHUNK_BYTES {
             let chunk: Vec<u8> = pending.drain(..CHUNK_BYTES).collect();
-            push_chunk(shared, &chunk, &mut chunks);
-            last_emit = Instant::now();
+            push_chunk(shared, &chunk, chunks);
         }
         // Sous-utilisation ou silence : pad à zéro pour garder la cadence
-        // 20 ms (vumètres vivants, fichier sans trou).
-        if pending.len() < CHUNK_BYTES && last_emit.elapsed() >= Duration::from_millis(20) {
+        // 20 ms (vumètres vivants, fichier sans trou). Un réveil tardif
+        // comble EXACTEMENT les chunks manqués : le premier complète le
+        // `pending` partiel s'il existe, les suivants sont des zéros.
+        let elapsed = shared
+            .lock()
+            .unwrap()
+            .last_emit
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let mut remaining = missed_chunks(elapsed).min(MAX_PAD_BURST);
+        if remaining > 0 {
+            debug_log(device, &format!("pad missed={remaining}"));
             pending.resize(CHUNK_BYTES, 0);
             let chunk: Vec<u8> = pending.drain(..CHUNK_BYTES).collect();
-            push_chunk(shared, &chunk, &mut chunks);
-            last_emit = Instant::now();
+            push_chunk(shared, &chunk, chunks);
+            remaining -= 1;
+            if remaining > 0 {
+                pad_silence(shared, chunks, remaining);
+            }
         }
         // Compteurs toutes les 5 s par thread, depuis le dernier log.
         if last_stats.elapsed() >= Duration::from_secs(5) {
             debug_log(
                 device,
-                &format!("pkts={pkts_since} silent={silent_since} invalid={invalid}"),
+                &format!(
+                    "pkts={pkts_since} silent={silent_since} glitch={glitch_since} invalid={invalid}"
+                ),
             );
             pkts_since = 0;
             silent_since = 0;
+            glitch_since = 0;
             last_stats = Instant::now();
         }
 
-        match &event {
+        match event {
             // Timeout = 20 ms : réveil aussi en cas de silence (loopback).
             Some(handle) => {
                 let _ = handle.wait_for_event(20);
@@ -564,4 +953,199 @@ pub fn to_meter(peak: f32) -> f64 {
         return 0.0;
     }
     (1.0 - 20.0 * f64::from(peak).log10() / FLOOR_DB).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn late_wakeups_pad_every_missed_chunk() {
+        assert_eq!(missed_chunks(Duration::from_millis(0)), 0);
+        assert_eq!(missed_chunks(Duration::from_millis(19)), 0);
+        assert_eq!(missed_chunks(Duration::from_millis(20)), 1);
+        assert_eq!(missed_chunks(Duration::from_millis(45)), 2);
+        assert_eq!(missed_chunks(Duration::from_millis(1000)), 50);
+        assert!(MAX_PAD_BURST == 1500);
+    }
+
+    #[test]
+    fn first_write_error_is_kept() {
+        let mut inner = Inner {
+            levels: VecDeque::from(vec![0.0; HISTORY]),
+            file: None,
+            paused: false,
+            error: None,
+            write_error: None,
+            last_emit: None,
+            endpoint: None,
+        };
+        note_write_error(&mut inner, "write", "disk full".to_owned());
+        note_write_error(&mut inner, "flush", "later failure".to_owned());
+        assert_eq!(inner.write_error.as_deref(), Some("write: disk full"));
+    }
+
+    #[test]
+    fn center_voice_survives_the_downmix() {
+        let (left, right) = downmix_samples(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(left > 0.5 && right > 0.5);
+        assert!((left - right).abs() < 0.01);
+    }
+
+    #[test]
+    fn front_left_and_surround_reach_their_side() {
+        let (left, right) = downmix_samples(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(left > 0.9 && right.abs() < 0.01);
+        let (left, right) = downmix_samples(&[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        assert!(left > 0.5);
+        assert!(left > right);
+    }
+
+    #[test]
+    fn full_scale_on_every_channel_does_not_clip() {
+        let (left, right) = downmix_samples(&[-1.0; 8]);
+        assert!(left.abs() <= 1.0 && right.abs() <= 1.0);
+    }
+
+    #[test]
+    fn converter_keeps_center_through_resampling() {
+        // 960 frames i16 5.1 à 48 kHz, centre seul (canal 2) à 440 Hz.
+        let desc = MixDesc {
+            rate: RATE,
+            channels: 6,
+            kind: SampleKind::I16,
+            blockalign: 12,
+            valid: true,
+        };
+        let mut converter = Converter { desc, pos: 0.0 };
+        let mut raw = vec![0u8; 960 * 12];
+        for frame in 0..960 {
+            let v = (f32::sin(2.0 * std::f32::consts::PI * 440.0 * frame as f32 / RATE as f32)
+                * 30000.0) as i16;
+            let off = frame * 12 + 2 * 2;
+            raw[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut out = Vec::new();
+        converter.push_packet(&raw, &mut out);
+        assert_eq!(out.len(), CHUNK_BYTES);
+        let peak = |channel: usize| {
+            out.as_chunks::<2>()
+                .0
+                .iter()
+                .skip(channel)
+                .step_by(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() as f32 / 32768.0)
+                .fold(0.0, f32::max)
+        };
+        assert!(peak(0) > 0.2, "left peak {}", peak(0));
+        assert!(peak(1) > 0.2, "right peak {}", peak(1));
+    }
+
+    #[test]
+    fn default_targets_follow_console_defaults() {
+        assert_eq!(
+            target_for_device("@DEFAULT_SOURCE@", None),
+            Target::FollowDefault {
+                dir: Direction::Capture,
+                role: Role::Console,
+            }
+        );
+        assert_eq!(
+            target_for_device("@DEFAULT_MONITOR@", None),
+            Target::FollowDefault {
+                dir: Direction::Render,
+                role: Role::Console,
+            }
+        );
+    }
+
+    #[test]
+    fn pinned_id_wins_over_default_but_empty_follows() {
+        assert_eq!(
+            target_for_device("@DEFAULT_SOURCE@", Some("pinned-id")),
+            Target::Fixed {
+                id: "pinned-id".to_owned(),
+            }
+        );
+        assert!(matches!(
+            target_for_device("@DEFAULT_SOURCE@", None),
+            Target::FollowDefault { .. }
+        ));
+        assert!(matches!(
+            target_for_device("@DEFAULT_SOURCE@", Some("")),
+            Target::FollowDefault { .. }
+        ));
+    }
+
+    #[test]
+    fn follow_default_reopens_only_on_its_own_default_or_current_id() {
+        let target = Target::FollowDefault {
+            dir: Direction::Capture,
+            role: Role::Console,
+        };
+        assert!(should_reopen(
+            &target,
+            &EndpointNotice::DefaultChanged {
+                dir: Direction::Capture,
+                role: Role::Console,
+            },
+            None,
+        ));
+        assert!(!should_reopen(
+            &target,
+            &EndpointNotice::DefaultChanged {
+                dir: Direction::Render,
+                role: Role::Console,
+            },
+            None,
+        ));
+        assert!(!should_reopen(
+            &target,
+            &EndpointNotice::DefaultChanged {
+                dir: Direction::Capture,
+                role: Role::Multimedia,
+            },
+            None,
+        ));
+        assert!(should_reopen(
+            &target,
+            &EndpointNotice::DeviceChanged("current".to_owned()),
+            Some("current"),
+        ));
+        assert!(!should_reopen(
+            &target,
+            &EndpointNotice::DeviceChanged("other".to_owned()),
+            Some("current"),
+        ));
+        assert!(!should_reopen(
+            &target,
+            &EndpointNotice::DeviceChanged("other".to_owned()),
+            None,
+        ));
+    }
+
+    #[test]
+    fn fixed_reopens_only_on_its_pinned_id() {
+        let target = Target::Fixed {
+            id: "pinned".to_owned(),
+        };
+        assert!(should_reopen(
+            &target,
+            &EndpointNotice::DeviceChanged("pinned".to_owned()),
+            Some("pinned"),
+        ));
+        assert!(!should_reopen(
+            &target,
+            &EndpointNotice::DeviceChanged("other".to_owned()),
+            Some("pinned"),
+        ));
+        assert!(!should_reopen(
+            &target,
+            &EndpointNotice::DefaultChanged {
+                dir: Direction::Capture,
+                role: Role::Console,
+            },
+            Some("pinned"),
+        ));
+    }
 }
