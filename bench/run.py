@@ -14,9 +14,11 @@
 
 Columns: found = words of the script that are in the transcript; side = of
 those, on the right side of the call (you or the other side); person = with
-the right person; leaked = lines of yours that are really the other side
-leaking into your mic; speakers = voices told apart / voices in the case;
-speaker error = share of speech given to the wrong speaker by `diarize`.
+the right person; wer = word error rate of the transcript in time order
+against the script; cer = character error rate, same; leaked = lines of
+yours that are really the other side leaking into your mic; speakers =
+voices told apart / voices in the case; speaker error = share of speech
+given to the wrong speaker by `diarize` (1.0 when nothing is scored).
 For AMI there is no script, so side and person come from who spoke when.
 Only Python's standard library is needed, plus ffmpeg for AMI.
 """
@@ -26,6 +28,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.request
 from collections import Counter, defaultdict
 from itertools import permutations
@@ -38,7 +41,44 @@ RTTM = "https://raw.githubusercontent.com/pyannote/AMI-diarization-setup/main/on
 
 
 def words(text):
-    return re.findall(r"[a-z0-9']+", text.lower())
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return re.findall(r"[\w']+", text)
+
+
+def edit_distance(a, b):
+    """Levenshtein distance between two sequences."""
+    prev = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        cur = [i]
+        for j, y in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x != y)))
+        prev = cur
+    return prev[len(b)]
+
+
+def wer_cer(markdown, truth):
+    """Word/character error rate: the transcript in time order vs the script.
+
+    Empty vs non-empty is 1.0; both empty is 0.0.
+    """
+    hyp_lines = sorted(parse(markdown), key=lambda l: l["start"])
+    hyp_words = [w for l in hyp_lines for w in l["words"]]
+    ref_words = [w for t in truth for w in words(t.get("text", ""))]
+    if not ref_words and not hyp_words:
+        wer = 0.0
+    elif not ref_words or not hyp_words:
+        wer = 1.0
+    else:
+        wer = edit_distance(hyp_words, ref_words) / len(ref_words)
+    hyp_chars = list(" ".join(hyp_words))
+    ref_chars = list(" ".join(ref_words))
+    if not ref_chars and not hyp_chars:
+        cer = 0.0
+    elif not ref_chars or not hyp_chars:
+        cer = 1.0
+    else:
+        cer = edit_distance(hyp_chars, ref_chars) / len(ref_chars)
+    return {"wer": wer, "cer": cer}
 
 
 def side_of(label):
@@ -114,7 +154,7 @@ def score_text(markdown, truth):
         if sum((own & theirs).values()) > max(0.6 * sum(own.values()), sum((own & mine).values())):
             leaked += 1
     return {"found": found / total, "side": side / total, "person": right / total, "leaked": leaked,
-            "speakers": f"{len(votes)}/{len(names)}"}
+            "speakers": f"{len(votes)}/{len(names)}", **wer_cer(markdown, truth)}
 
 
 def score_timing(markdown, truth):
@@ -175,7 +215,11 @@ def score_turns(turns, truth, step=0.1):
         votes[s][t] += v
     mapping = best_mapping(votes, sorted({t for t in label if t not in (None, "#")}))
     matched = sum(votes[s][t] for s, t in mapping.items())
-    return {"speaker error": (scored - missed - matched) / max(scored, 1),
+    if not scored:
+        error = 1.0
+    else:
+        error = (scored - matched) / scored
+    return {"speaker error": error,
             "speakers": f"{len({t['speaker'] for t in turns})}/{len({t['speaker'] for t in truth})}"}
 
 
@@ -303,7 +347,7 @@ def main():
             scored["error"] = str(e)
         results[name] = scored
 
-    columns = ["found", "side", "person", "leaked", "lines", "speakers", "speaker error", "seconds"]
+    columns = ["found", "side", "person", "wer", "cer", "leaked", "lines", "speakers", "speaker error", "seconds"]
     shown = [c for c in columns if any(c in r for r in results.values())]
     width = max(len(n) for n in results) + 2
     print("case".ljust(width) + "".join(c.rjust(15) for c in shown))

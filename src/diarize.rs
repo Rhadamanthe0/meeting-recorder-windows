@@ -31,6 +31,16 @@ pub fn turns(
     let _ = events.send_blocking(Event::Stage("Finding speakers".into()));
     let _ = events.send_blocking(Event::Progress(0.0));
     let mut model = crate::nemotron::Model::load(&path)?;
+    turns_loaded(&mut model, samples, speakers, events, abort)
+}
+
+pub fn turns_loaded(
+    model: &mut crate::nemotron::Model,
+    samples: &[f32],
+    speakers: Option<usize>,
+    events: &Events,
+    abort: &Abort,
+) -> Result<Vec<Turn>, String> {
     let probs = model.probabilities(samples, events, abort)?;
     let raw = segments(&probs, 8);
     let raw = match speakers {
@@ -88,16 +98,19 @@ fn keep_largest(raw: Vec<(i64, i64, i32)>, n: usize) -> Vec<(i64, i64, i32)> {
     reassign(raw, |id| kept.contains(id))
 }
 
-/// Gives every cluster with little speech (under 4 seconds, or under 4% of
-/// all speech) to the speaker of the nearest turn from a cluster that stays.
+/// Gives every cluster with little speech (under FRAGMENT_MS) to the speaker
+/// of the nearest turn from a cluster that stays. Absolute only: no relative
+/// share, which would erase a participant with 45 s on a 1 h meeting;
+/// `keep_largest` keeps its own rule for an explicit speaker count.
 fn absorb_small_clusters(raw: Vec<(i64, i64, i32)>) -> Vec<(i64, i64, i32)> {
+    const FRAGMENT_MS: i64 = 2500;
     let mut spoken = std::collections::HashMap::<i32, i64>::new();
     for (start, end, id) in &raw {
         *spoken.entry(*id).or_default() += end - start;
     }
-    let total: i64 = spoken.values().sum();
-    let floor = (total * 4 / 100).max(4000);
-    reassign(raw, |id| spoken.get(id).is_some_and(|ms| *ms >= floor))
+    reassign(raw, |id| {
+        spoken.get(id).is_some_and(|ms| *ms >= FRAGMENT_MS)
+    })
 }
 
 /// Moves the turns of every speaker that `keeps` rejects to the speaker of
@@ -282,5 +295,13 @@ mod tests {
         assert_eq!(speaker_at(&turns, 6000, 6500), 1);
         assert_eq!(turn_start_near(&turns, 1, 2500), Some(1800));
         assert_eq!(turn_start_near(&turns, 1, 9000), None);
+    }
+
+    #[test]
+    fn quiet_participants_stay_independent_speakers() {
+        let raw = vec![(0, 3_555_000, 0), (100_000, 145_000, 1)];
+        assert_eq!(absorb_small_clusters(raw.clone()), raw);
+        let absorbed = absorb_small_clusters(vec![(0, 60_000, 0), (70_000, 72_000, 1)]);
+        assert!(absorbed.iter().all(|(_, _, id)| *id == 0));
     }
 }

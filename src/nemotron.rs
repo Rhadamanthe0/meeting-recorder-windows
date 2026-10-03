@@ -78,8 +78,13 @@ fn dir() -> PathBuf {
     models_dir().join("nemotron-3-diarization")
 }
 
+/// Held while a model downloads, so a second caller waits instead of
+/// fetching the same file again.
+static DOWNLOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The model files, downloaded first when needed (about 120 MB).
 pub fn ensure(events: &Events, abort: &Abort) -> Result<PathBuf, String> {
+    let _one_at_a_time = DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner());
     let dir = dir();
     for (file, min_bytes) in FILES {
         let path = dir.join(file);

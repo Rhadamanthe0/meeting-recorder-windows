@@ -4,12 +4,9 @@
 //! la réexportation ci-dessous garde ces usages compatibles sur les deux OS.
 //!
 //! `RATE`, `CHANNELS` et `HISTORY` sont définis une seule fois ici ; les
-//! backends s'y réfèrent (`super::RATE`, ...) afin que tout chunk capturé
-//! reste en s16le 48 kHz stéréo comme l'attend `transcribe.rs`.
-//!
-//! NOTE : `src/audio/linux.rs` est hors périmètre et conserve ses propres
-//! constantes internes (mêmes valeurs) ; le glob ci-dessous est masqué par
-//! les définitions locales, sans conflit.
+//! deux backends (`linux` parec et `windows` WASAPI) s'y réfèrent
+//! (`super::RATE`, ...) afin que tout chunk capturé reste en s16le 48 kHz
+//! stéréo comme l'attend `transcribe.rs`.
 
 /// 48 kHz, imposé par `transcribe.rs` (downsample vers 16 kHz).
 pub const RATE: u32 = 48_000;

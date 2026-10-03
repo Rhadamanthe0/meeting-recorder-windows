@@ -234,14 +234,85 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
 /// Writes the manifest into `dir`, replacing one with another name (after a rename).
 pub fn write(dir: &Path, manifest: &Manifest) -> std::io::Result<PathBuf> {
     let target = path_for(dir, &manifest.title);
-    if let Some(old) = find(dir)
+    let old = find(dir);
+    let text = serde_json::to_string_pretty(&manifest.to_json()).unwrap_or_default() + "\n";
+    atomic_write(&target, text.as_bytes())?;
+    if let Some(old) = old
         && old != target
     {
         let _ = std::fs::remove_file(old);
     }
-    let text = serde_json::to_string_pretty(&manifest.to_json()).unwrap_or_default() + "\n";
-    std::fs::write(&target, text)?;
     Ok(target)
+}
+
+pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // Unique per attempt so two writers never share a temp file: nanos +
+    // process id + a per-process counter, created exclusively.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}-{}-{}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "meeting".to_owned()),
+        std::process::id(),
+        nanos,
+        seq
+    ));
+    // `create_new` refuses to truncate a file another writer just reserved.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let write_result = (|| {
+        use std::io::Write;
+        file.write_all(contents)?;
+        file.flush()?;
+        file.sync_data()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return write_result;
+    }
+    drop(file);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveReport {
+    pub audio: bool,
+    pub tracks: bool,
+    pub manifest: bool,
+}
+
+impl SaveReport {
+    pub fn ok(self) -> bool {
+        self.audio && self.tracks && self.manifest
+    }
+
+    pub fn problems(self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if !self.audio {
+            out.push("Could not save the audio.");
+        }
+        if !self.tracks {
+            out.push("Could not save the separate tracks; transcribing again may be unavailable.");
+        }
+        if !self.manifest {
+            out.push("Could not save the meeting file.");
+        }
+        out
+    }
 }
 
 /// Reads a meeting from a `.meeting-recorder` file or from its folder. A folder without
@@ -336,5 +407,49 @@ mod tests {
         let out = relabel(&tmp, "\u{1}", "Remote");
         assert!(out.contains("**[00:01] Remote:** Hi."));
         assert!(out.contains("**[00:03] You:** You: said hi."));
+    }
+
+    #[test]
+    fn atomic_write_replaces_only_after_success() {
+        let dir = std::env::temp_dir().join(format!("verify-atomic-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("note.meeting-recorder");
+        std::fs::write(&target, b"old\n").unwrap();
+        super::atomic_write(&target, b"new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let missing = dir.join("no-such-dir").join("x.meeting-recorder");
+        assert!(super::atomic_write(&missing, b"new\n").is_err());
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manifest_write_keeps_old_until_new_is_durable() {
+        let dir = std::env::temp_dir().join(format!("verify-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut first =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        first.title = "Alpha".into();
+        let old = super::write(&dir, &first).unwrap();
+        assert!(old.exists());
+        assert_eq!(
+            std::fs::read_to_string(&old).unwrap().contains("Alpha"),
+            true
+        );
+        let mut second = first.clone();
+        second.title = "Beta".into();
+        let new = super::write(&dir, &second).unwrap();
+        assert!(new.exists());
+        assert_ne!(old, new);
+        assert!(!old.exists());
+        assert!(std::fs::read_to_string(&new).unwrap().contains("Beta"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

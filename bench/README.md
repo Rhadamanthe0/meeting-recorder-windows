@@ -34,17 +34,19 @@ Each case in `fixtures/` has its audio as Opus (like the app's own recordings) a
 - **found**: words of the script that are in the transcript, near the right moment
 - **side**: of those, on the right side of the call (you or the other side)
 - **person**: of those, with the right person (labels are matched to people one to one)
+- **wer**: word error rate of the transcript in time order against the script (1.0 when one side is empty)
+- **cer**: character error rate, same
 - **leaked**: lines of yours that are really the other side coming through your speakers
 - **lines**: lines in the transcript, only for `silence`
 - **speakers**: voices told apart, out of the voices in the case
-- **speaker error**: share of speech that `diarize` gives to the wrong speaker (imports only)
+- **speaker error**: share of speech that `diarize` gives to the wrong speaker (imports only, 1.0 when nothing is scored)
 - **seconds**: how long the transcription took
 
 For AMI there is no script, so side and person are measured by who was speaking during each line, weighted by its words.
 
 ## In CI
 
-Every pull request and every push to main runs the bench with `--ami --model small.en --check` on GitHub Actions (`.github/workflows/bench.yml`), and fails when a case drops below `thresholds.json`. CI uses the `small.en` whisper model: with the app's default model a run takes over half an hour on GitHub's four cores, and the bench is mostly about who said what, which does not depend on the model. The thresholds sit a few points under the scores with `small.en`, so a different CPU does not fail a run by chance. The scores go into the run's summary, and "Bench comment" posts them on the pull request, also on pull requests from forks. A change that makes the app better can raise the thresholds in the same pull request.
+The automated checks run `bench/tests.py` in CI via `.github/workflows/windows.yml`. There is no `bench.yml`: the audio bench above is manual, it needs microphones, speakers and minutes of audio that CI does not have. Run it locally before changing transcription, diarization or scoring, and keep `thresholds.json` honest with what you measured.
 
 ## Making new cases
 

@@ -383,6 +383,14 @@ struct Recorder {
     /// The meeting the deferred auto-generation belongs to (`started_at` at
     /// `finished` time). The probe callback only generates if it is still current.
     pending_chapters_started: Cell<i64>,
+    /// Identity of the logical document: bumped on every meeting change so a
+    /// transcription or chapters in flight cannot write into the next one.
+    meeting_gen: Cell<u64>,
+    /// Revision of the transcript on disk: bumped on every write, so an undo
+    /// only restores text that was not touched meanwhile.
+    transcript_rev: Cell<u64>,
+    /// The `meeting_gen` a deferred auto-generation belongs to.
+    pending_chapters_gen: Cell<u64>,
     generating: Cell<bool>,
     current_line: Cell<i32>,
 
@@ -849,6 +857,9 @@ impl Recorder {
             agent_checking: Cell::new(false),
             pending_chapters: Cell::new(false),
             pending_chapters_started: Cell::new(0),
+            meeting_gen: Cell::new(0),
+            transcript_rev: Cell::new(0),
+            pending_chapters_gen: Cell::new(0),
             generating: Cell::new(false),
             current_line: Cell::new(-1),
             mic,
@@ -1201,10 +1212,10 @@ impl Recorder {
             let this = r.clone();
             glib::spawn_future_local(async move {
                 let result = this
-                    .run_transcription(tracks, this.selected_language())
+                    .run_transcription(tracks, this.selected_language().to_owned())
                     .await;
                 this.hold_animation(&result).await;
-                this.finished(true, result);
+                this.finished(None, result);
             });
         });
 
@@ -1354,6 +1365,12 @@ impl Recorder {
 
     fn toast(&self, message: &str) {
         self.toasts.add_toast(adw::Toast::new(message));
+    }
+
+    /// New logical document: a transcription or chapters in flight for the
+    /// previous one must not write into this one.
+    fn bump_meeting(&self) {
+        self.meeting_gen.set(self.meeting_gen.get().wrapping_add(1));
     }
 
     fn selected_format(&self) -> Format {
@@ -1506,6 +1523,8 @@ impl Recorder {
     fn tick(&self) {
         #[cfg(target_os = "windows")]
         self.warn_capture_once();
+        #[cfg(target_os = "windows")]
+        self.refresh_endpoint_tooltips();
         if self.state.get() == State::Recording {
             let elapsed = self.elapsed();
             let clock = format_elapsed(elapsed);
@@ -1531,17 +1550,58 @@ impl Recorder {
         let failing = self
             .mic
             .init_error()
-            .map(|step| ("Microphone", step))
-            .or_else(|| self.system.init_error().map(|step| ("System audio", step)));
+            .map(|step| ("Microphone", step, false))
+            .or_else(|| {
+                self.system
+                    .init_error()
+                    .map(|step| ("System audio", step, false))
+            })
+            .or_else(|| {
+                self.mic
+                    .write_error()
+                    .map(|step| ("Microphone", step, true))
+            })
+            .or_else(|| {
+                self.system
+                    .write_error()
+                    .map(|step| ("System audio", step, true))
+            });
         match failing {
-            Some((who, step)) if !self.capture_warned.get() => {
+            Some((who, step, degraded)) if !self.capture_warned.get() => {
                 self.capture_warned.set(true);
-                self.toast(&format!(
-                    "{who} capture failed ({step}): check your input device"
-                ));
+                if degraded {
+                    self.toast(&format!("Recording degraded ({who}: {step})"));
+                } else {
+                    self.toast(&format!(
+                        "{who} capture failed ({step}): check your input device"
+                    ));
+                }
             }
             None => self.capture_warned.set(false),
             _ => {}
+        }
+    }
+
+    /// Shows the endpoint actually captured in the meter tooltips (item 7).
+    /// Runs on the UI thread from `tick` (500 ms): two mutex clones, no block,
+    /// no toast (anti-spam while the device changes).
+    #[cfg(target_os = "windows")]
+    fn refresh_endpoint_tooltips(&self) {
+        for ((meter, compact), source) in self
+            .meters
+            .iter()
+            .zip(self.compact_meters.iter())
+            .zip([&self.mic, &self.system])
+        {
+            if let Some(endpoint) = source.endpoint() {
+                let text = if endpoint.id.is_empty() {
+                    endpoint.friendlyname
+                } else {
+                    format!("{}\n{}", endpoint.friendlyname, endpoint.id)
+                };
+                meter.set_tooltip_text(Some(&text));
+                compact.set_tooltip_text(Some(&text));
+            }
         }
     }
 
@@ -1685,8 +1745,17 @@ impl Recorder {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(ipc::now, |d| d.as_secs() as i64);
         // Reserved atomically: two imports at once never share a folder.
-        let _ = std::fs::create_dir_all(platform::meetings_dir());
-        let out = free_output_dir(started_at, &title, |p| std::fs::create_dir(p));
+        if std::fs::create_dir_all(platform::meetings_dir()).is_err() {
+            self.toast("Could not import: cannot create the meetings folder");
+            return;
+        }
+        let out = match free_output_dir(started_at, &title, |p| std::fs::create_dir(p)) {
+            Ok(out) => out,
+            Err(e) => {
+                self.toast(&format!("Could not import: {e}"));
+                return;
+            }
+        };
 
         self.player.unload();
         // An import replaces the meeting: drop any deferred auto-generation
@@ -1694,6 +1763,7 @@ impl Recorder {
         self.pending_chapters.set(false);
         self.pending_chapters_started.set(0);
         self.lines.borrow_mut().clear();
+        self.bump_meeting();
         self.title_row.set_text(&title);
         self.started_at.set(started_at);
         *self.result_dir.borrow_mut() = Some(out.clone());
@@ -1724,19 +1794,37 @@ impl Recorder {
             let converted = gio::spawn_blocking(move || import_audio(&source, &target, &staging))
                 .await
                 .unwrap_or_else(|_| Err("the import stopped unexpectedly".into()));
+            let conversion_failed = converted.is_err();
             let result = match converted {
                 Ok(duration) => {
                     if let Some(m) = this.manifest.borrow_mut().as_mut() {
                         m.duration_secs = duration;
-                        let _ = meeting::write(&out, m);
+                        if meeting::write(&out, m).is_err() {
+                            this.toast("Could not save the meeting file");
+                        }
                     }
-                    this.run_transcription(Tracks::Single(source_track(&out), speakers), language)
-                        .await
+                    this.run_transcription(
+                        Tracks::Single(source_track(&out), speakers),
+                        language.to_owned(),
+                    )
+                    .await
                 }
                 Err(message) => Err(message),
             };
+            if conversion_failed {
+                // Never a partial Done: the folder goes, the page resets.
+                if std::fs::remove_dir_all(&out).is_err() {}
+                *this.result_dir.borrow_mut() = None;
+                *this.manifest.borrow_mut() = None;
+                this.animation.set_running(false);
+                let message = result.unwrap_err();
+                this.bump_meeting();
+                this.ready();
+                this.toast(&format!("Could not import: {message}"));
+                return;
+            }
             this.hold_animation(&result).await;
-            this.finished(result.is_ok(), result);
+            this.finished(None, result);
         });
     }
 
@@ -1831,12 +1919,27 @@ impl Recorder {
             self.toast("Finish the current recording first");
             return;
         }
+        if self.hub.upgrade().and_then(|hub| hub.recording()).is_some() {
+            self.toast("Another window is recording");
+            return;
+        }
         let note = note.unwrap_or_else(|| RecordingNote {
             title: "Recovered recording".to_owned(),
             started_at: ipc::now() - raw_duration(&staging),
             format: settings::load_format(),
             language: settings::load_language().to_owned(),
         });
+        if std::fs::create_dir_all(platform::meetings_dir()).is_err() {
+            self.toast("Could not save the meeting: cannot create the meetings folder");
+            return;
+        }
+        let out = match free_output_dir(note.started_at, &note.title, |p| std::fs::create_dir(p)) {
+            Ok(out) => out,
+            Err(e) => {
+                self.toast(&format!("Could not save the meeting: {e}"));
+                return;
+            }
+        };
         self.title_row.set_text(&note.title);
         if let Some(i) = Format::ALL.iter().position(|f| *f == note.format) {
             self.format_row.set_selected(i as u32);
@@ -1850,11 +1953,12 @@ impl Recorder {
         self.started_at.set(note.started_at);
         self.paused.set(false);
         self.paused_secs.set(0);
-        *self.staging.borrow_mut() = Some(staging);
+        *self.staging.borrow_mut() = Some(staging.clone());
         *self.result_dir.borrow_mut() = None;
-        // Straight into what Stop does from here.
-        self.set_state(State::Recording);
-        self.stop();
+        self.bump_meeting();
+        // Never stops a live capture: the crashed recording is already still.
+        self.animation_since.set(Some(std::time::Instant::now()));
+        self.finalize_staging(staging, out, note.format, note.language, None);
     }
 
     /// Says so when the speech model is not on disk yet, with a button to get it.
@@ -1925,6 +2029,7 @@ impl Recorder {
         *self.manifest.borrow_mut() = None;
         // Leaving the done page: a deferred auto-generation has no meeting to run for.
         self.pending_chapters.set(false);
+        self.bump_meeting();
         self.title_row.set_text("");
         self.timer.set_label("00:00");
         self.compact_timer.set_label("00:00");
@@ -1952,19 +2057,28 @@ impl Recorder {
         self.paused_secs.set(0);
         self.pause_began.set(0);
         let started_at = ipc::now();
-        let staging = crate::platform::cache_dir()
-            .join(APP_NAME)
-            .join(started_at.to_string());
-        if let Err(e) = std::fs::create_dir_all(&staging)
-            .and_then(|_| self.mic.start_recording(&staging.join("mic.raw")))
+        let staging = match create_recording_staging(started_at) {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.status_label
+                    .set_label(&format!("Could not start recording: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = self
+            .mic
+            .start_recording(&staging.join("mic.raw"))
             .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
         {
-            self.mic.stop_recording();
-            self.system.stop_recording();
+            // Best-effort stop: the capture never really started.
+            if self.mic.stop_recording().is_err() {}
+            if self.system.stop_recording().is_err() {}
+            if std::fs::remove_dir_all(&staging).is_err() {}
             self.status_label
                 .set_label(&format!("Could not start recording: {e}"));
             return;
         }
+        self.bump_meeting();
         write_recording_note(
             &staging,
             &self.title(),
@@ -1981,6 +2095,13 @@ impl Recorder {
         self.set_state(State::Recording);
     }
 
+    /// Stops the live capture, returning the first error if any.
+    fn stop_live_capture(&self) -> Option<String> {
+        let first = self.mic.stop_recording().err().map(|e| e.to_string());
+        let second = self.system.stop_recording().err().map(|e| e.to_string());
+        first.or(second)
+    }
+
     fn stop(self: &Rc<Self>) {
         if self.state.get() != State::Recording {
             return;
@@ -1990,32 +2111,56 @@ impl Recorder {
                 .set(self.paused_secs.get() + ipc::now() - self.pause_began.get());
             self.paused.set(false);
         }
-        self.freeze_meters(false);
-        self.animation_since.set(Some(std::time::Instant::now()));
-        self.mic.stop_recording();
-        self.system.stop_recording();
+        // Reserve the meeting folder before stopping: on failure the
+        // recording stays intact and keeps going.
+        if let Err(e) = std::fs::create_dir_all(platform::meetings_dir()) {
+            self.toast(&format!("Could not save the meeting: {e}"));
+            return;
+        }
+        let out = match free_output_dir(self.started_at.get(), &self.title(), |p| {
+            std::fs::create_dir(p)
+        }) {
+            Ok(out) => out,
+            Err(e) => {
+                self.toast(&format!("Could not save the meeting: {e}"));
+                return;
+            }
+        };
         let Some(staging) = self.staging.borrow().clone() else {
             return;
         };
+        self.freeze_meters(false);
+        let capture_error = self.stop_live_capture();
+        let format = self.selected_format();
+        let language = self.selected_language().to_owned();
+        self.finalize_staging(staging, out, format, language, capture_error);
+    }
+
+    /// Exports the staging audio, writes the manifest and transcribes, from
+    /// either Stop or recovery. `capture_error` is a stop-time failure to
+    /// surface with any export problem.
+    fn finalize_staging(
+        self: &Rc<Self>,
+        staging: PathBuf,
+        out: PathBuf,
+        format: Format,
+        language: String,
+        capture_error: Option<String>,
+    ) {
+        self.animation_since.set(Some(std::time::Instant::now()));
         self.set_compact(false);
         // Straight to the animation: the waves would suggest it is still recording.
         self.animation.reset();
         self.animation.set_stage("Saving audio");
         self.animation.set_running(true);
         self.set_state(State::Stopping);
-
-        let format = self.selected_format();
-        let language = self.selected_language();
-        // Reserved atomically: two windows stopping at once never share a folder.
-        let _ = std::fs::create_dir_all(platform::meetings_dir());
-        let out = free_output_dir(self.started_at.get(), &self.title(), |p| {
-            std::fs::create_dir(p)
-        });
         let this = self.clone();
         glib::spawn_future_local(async move {
             let (audio_out, audio_staging) = (out.clone(), staging.clone());
             let saved = gio::spawn_blocking(move || {
-                let _ = std::fs::create_dir_all(&audio_out);
+                if std::fs::create_dir_all(&audio_out).is_err() {
+                    return (false, false);
+                }
                 let (mic, system) = (
                     audio_staging.join("mic.raw"),
                     audio_staging.join("system.raw"),
@@ -2031,7 +2176,7 @@ impl Recorder {
                 started_at: this.started_at.get(),
                 duration_secs: raw_duration(&staging),
                 format,
-                language: language.to_owned(),
+                language: language.clone(),
                 speakers: vec![
                     settings::load_your_name(),
                     meeting::DEFAULT_REMOTE.to_owned(),
@@ -2043,31 +2188,48 @@ impl Recorder {
                 chapters: Vec::new(),
                 chapters_by: None,
             };
-            let _ = meeting::write(&out, &manifest);
+            let manifest_ok = meeting::write(&out, &manifest).is_ok();
             *this.manifest.borrow_mut() = Some(manifest);
-            *this.result_dir.borrow_mut() = Some(out);
+            *this.result_dir.borrow_mut() = Some(out.clone());
 
             let result = this
                 .run_transcription(Tracks::Raw(staging.clone()), language)
                 .await;
-            // The kept tracks are enough to transcribe again; the raw files can go.
-            if saved == (true, true) {
-                let _ = std::fs::remove_dir_all(&staging);
+            let report = meeting::SaveReport {
+                audio: saved.0,
+                tracks: saved.1,
+                manifest: manifest_ok,
+            };
+            // The kept tracks are enough to transcribe again; the raw files
+            // go only when everything (audio, tracks, manifest, transcript)
+            // is safely on disk.
+            if report.ok() && result.is_ok() {
+                if std::fs::remove_dir_all(&staging).is_err() {}
             }
+            let mut problems = report.problems().join(" ");
+            if let Some(e) = capture_error {
+                if !problems.is_empty() {
+                    problems.push(' ');
+                }
+                problems.push_str(&format!("Capture stopped with an error: {e}."));
+            }
+            let audio_problem = if problems.is_empty() {
+                None
+            } else {
+                Some(problems)
+            };
             this.hold_animation(&result).await;
-            this.finished(saved.0, result);
+            this.finished(audio_problem, result);
         });
     }
 
     /// Transcribes into `result_dir/transcript.md`, driving the animation.
-    async fn run_transcription(
-        &self,
-        tracks: Tracks,
-        language: &'static str,
-    ) -> Result<(), String> {
+    async fn run_transcription(&self, tracks: Tracks, language: String) -> Result<(), String> {
         let Some(out) = self.result_dir.borrow().clone() else {
             return Err("no meeting folder".into());
         };
+        let generation = self.meeting_gen.get();
+        let started = self.started_at.get();
         self.set_compact(false);
         if self.animation_since.get().is_none() {
             self.animation_since.set(Some(std::time::Instant::now()));
@@ -2082,10 +2244,17 @@ impl Recorder {
         *self.abort.borrow_mut() = Some(abort.clone());
         let (events_tx, events_rx) = async_channel::unbounded::<Event>();
         let (done_tx, done_rx) = async_channel::bounded(1);
+        let worker_language = language.clone();
         std::thread::spawn(move || {
             let result = match tracks {
                 Tracks::Single(path, speakers) => transcribe::load_track(&path).and_then(|track| {
-                    transcribe::transcribe_single(&track, language, speakers, &events_tx, &abort)
+                    transcribe::transcribe_single(
+                        &track,
+                        &worker_language,
+                        speakers,
+                        &events_tx,
+                        &abort,
+                    )
                 }),
                 Tracks::Raw(dir) | Tracks::Kept(dir) => {
                     let (mic_path, computer_path) = if dir.join("mic.raw").exists() {
@@ -2095,7 +2264,13 @@ impl Recorder {
                     };
                     transcribe::load_track(&mic_path).and_then(|mic| {
                         let computer = transcribe::load_track(&computer_path)?;
-                        transcribe::transcribe(&mic, &computer, language, &events_tx, &abort)
+                        transcribe::transcribe(
+                            &mic,
+                            &computer,
+                            &worker_language,
+                            &events_tx,
+                            &abort,
+                        )
                     })
                 }
             };
@@ -2137,6 +2312,13 @@ impl Recorder {
         *self.abort.borrow_mut() = None;
 
         let transcript = result?;
+        // The meeting changed meanwhile: discard, never write into the next one.
+        if self.meeting_gen.get() != generation
+            || self.started_at.get() != started
+            || self.result_dir.borrow().clone() != Some(out.clone())
+        {
+            return Err("the meeting changed while transcribing; result discarded".into());
+        }
         // The name as it is now; it may have been edited while transcribing.
         let out = self.result_dir.borrow().clone().unwrap_or(out);
         let date = glib::DateTime::from_unix_local(self.started_at.get())
@@ -2210,16 +2392,25 @@ impl Recorder {
                 .filter(|(label, name)| label != name)
                 .collect();
             markdown = meeting::relabel_all(&markdown, &renames);
-            manifest.language = language.to_owned();
+            manifest.language = language.clone();
             manifest.model = Some(crate::models::configured());
             manifest.title = self.title();
             // Chapters of a previous transcript would point at lines that are gone.
             manifest.chapters.clear();
             manifest.chapters_by = None;
-            let _ = meeting::write(&out, manifest);
+            if meeting::write(&out, manifest).is_err() {
+                self.toast("Could not save the meeting file");
+                return Err("could not save the meeting file".into());
+            }
         }
-        std::fs::write(out.join("transcript.md"), markdown)
-            .map_err(|e| format!("could not write the transcript: {e}"))
+        meeting::atomic_write(&out.join("transcript.md"), markdown.as_bytes())
+            .map_err(|e| format!("could not write the transcript: {e}"))?;
+        self.transcript_rev
+            .set(self.transcript_rev.get().wrapping_add(1));
+        if transcript.diarization_failed {
+            self.toast("Speaker detection was unsure; names may be off");
+        }
+        Ok(())
     }
 
     /// Keeps the animation on screen for at least ten seconds, also after a
@@ -2239,18 +2430,18 @@ impl Recorder {
         self.animation.set_running(false);
     }
 
-    fn finished(self: &Rc<Self>, audio_ok: bool, transcript: Result<(), String>) {
+    fn finished(self: &Rc<Self>, audio_problem: Option<String>, transcript: Result<(), String>) {
         self.done_title_row.set_text(&self.title_row.text());
         self.set_state(State::Done);
         // Follow a name that was edited while the transcription ran.
         self.apply_title();
 
-        let problem = match (&transcript, audio_ok) {
+        let problem = match (&transcript, audio_problem) {
             (Err(message), _) if message == CANCELLED => {
                 Some("Transcription cancelled.".to_owned())
             }
             (Err(message), _) => Some(format!("Transcription failed: {message}.")),
-            (Ok(()), false) => Some("Could not save the audio.".to_owned()),
+            (_, Some(audio)) => Some(audio),
             _ => None,
         };
         let text = self
@@ -2277,6 +2468,7 @@ impl Recorder {
             } else if self.agent_checking.get() {
                 self.pending_chapters.set(true);
                 self.pending_chapters_started.set(self.started_at.get());
+                self.pending_chapters_gen.set(self.meeting_gen.get());
             }
         }
         if self.quit_when_done.get()
@@ -2336,15 +2528,21 @@ impl Recorder {
                 self.toast("Could not import this meeting into Meetings");
                 return;
             }
-            let out = free_output_dir(manifest.started_at, &manifest.title, |p| {
+            let out = match free_output_dir(manifest.started_at, &manifest.title, |p| {
                 std::fs::create_dir(p)
-            });
+            }) {
+                Ok(out) => out,
+                Err(e) => {
+                    self.toast(&format!("Could not import this meeting into Meetings: {e}"));
+                    return;
+                }
+            };
             if meeting::write(&out, &manifest).is_err() {
                 self.toast("Could not import this meeting into Meetings");
                 return;
             }
             if !copy_imported_artefacts(&dir, &out) {
-                let _ = std::fs::remove_dir_all(&out);
+                if std::fs::remove_dir_all(&out).is_err() {}
                 self.toast("Could not copy the meeting files; nothing was imported");
                 return;
             }
@@ -2355,7 +2553,9 @@ impl Recorder {
         // import-copy above, `find(&out)` sees the manifest just written, so
         // this is skipped naturally.)
         if meeting::find(&dir).is_none() && is_owned_meeting_dir(&dir) {
-            let _ = meeting::write(&dir, &manifest);
+            if meeting::write(&dir, &manifest).is_err() {
+                self.toast("Could not save the meeting file");
+            }
         }
 
         self.loading.set(true);
@@ -2375,6 +2575,7 @@ impl Recorder {
         self.done_title_row.set_text(&manifest.title);
         *self.manifest.borrow_mut() = Some(manifest);
         *self.result_dir.borrow_mut() = Some(dir.clone());
+        self.bump_meeting();
         self.set_state(State::Done);
         let text = std::fs::read_to_string(dir.join("transcript.md")).ok();
         let problem = text
@@ -2537,6 +2738,7 @@ impl Recorder {
             let pending = this.pending_chapters.replace(false);
             if pending
                 && this.started_at.get() == this.pending_chapters_started.get()
+                && this.meeting_gen.get() == this.pending_chapters_gen.get()
                 && !this.generating.get()
                 && this.can_have_chapters()
             {
@@ -2623,6 +2825,7 @@ impl Recorder {
         // Identity of this meeting, in memory: two meetings started in the
         // same minute share the folder prefix, but not `started_at`.
         let gen_started = self.started_at.get();
+        let generation = self.meeting_gen.get();
         // `lines` belongs to the meeting it was rendered for; an import
         // meanwhile clears it, so a manual Generate must not run on stale lines.
         if self.lines_started.get() != gen_started {
@@ -2654,6 +2857,7 @@ impl Recorder {
             let current = this.result_dir.borrow().clone();
             let Some(dir) = current.filter(|d| {
                 Recorder::chapters_still_current(&dir, gen_started, d, this.started_at.get())
+                    && this.meeting_gen.get() == generation
             }) else {
                 return;
             };
@@ -2692,18 +2896,36 @@ impl Recorder {
 
     fn store_chapters(self: &Rc<Self>, dir: &std::path::Path, list: &[Chapter], agent: &Agent) {
         let mut saved = true;
+        // Merge with what is on disk: the manifest may have changed meanwhile.
+        let on_disk = meeting::open(dir).map(|(_, m)| m);
         if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
+            if let Some(disk) = on_disk {
+                manifest.title = disk.title.clone();
+                manifest.speakers = disk.speakers.clone();
+                manifest.labels = disk.labels.clone();
+                manifest.language = disk.language.clone();
+            }
             manifest.chapters = list.to_vec();
             manifest.chapters_by = Some(agent.id.clone());
             if meeting::write(dir, manifest).is_err() {
                 saved = false;
+            } else if let Some(updated) = meeting::open(dir).map(|(_, m)| m) {
+                *manifest = updated;
             }
         }
         let transcript = dir.join("transcript.md");
         match std::fs::read_to_string(&transcript) {
             Ok(text) => {
-                if std::fs::write(&transcript, chapters::apply_to_markdown(&text, list)).is_err() {
+                if meeting::atomic_write(
+                    &transcript,
+                    chapters::apply_to_markdown(&text, list).as_bytes(),
+                )
+                .is_err()
+                {
                     saved = false;
+                } else {
+                    self.transcript_rev
+                        .set(self.transcript_rev.get().wrapping_add(1));
                 }
             }
             Err(_) => saved = false,
@@ -2927,11 +3149,11 @@ impl Recorder {
     }
 
     /// Changes transcript.md line by line and shows the result, keeping the
-    /// scroll position. Returns the text as it was, for undo.
+    /// scroll position. Returns (before, after), for undo.
     fn rewrite_transcript(
         self: &Rc<Self>,
         change: impl FnOnce(&mut Vec<String>),
-    ) -> Option<String> {
+    ) -> Option<(String, String)> {
         let dir = self.result_dir.borrow().clone()?;
         let path = dir.join("transcript.md");
         let before = std::fs::read_to_string(&path).ok()?;
@@ -2946,12 +3168,14 @@ impl Recorder {
             tidy.push(line);
         }
         let after = tidy.join("\n") + "\n";
-        if std::fs::write(&path, &after).is_err() {
+        if meeting::atomic_write(&path, after.as_bytes()).is_err() {
             self.toast("Could not save the transcript");
             return None;
         }
+        self.transcript_rev
+            .set(self.transcript_rev.get().wrapping_add(1));
         self.redraw_transcript(&after);
-        Some(before)
+        Some((before, after))
     }
 
     fn redraw_transcript(self: &Rc<Self>, markdown: &str) {
@@ -2988,7 +3212,7 @@ impl Recorder {
     fn delete_paragraph(self: &Rc<Self>, sources: &[usize]) {
         let mut sources = sources.to_vec();
         sources.sort_unstable();
-        let Some(before) = self.rewrite_transcript(move |lines| {
+        let Some((before, after)) = self.rewrite_transcript(move |lines| {
             for index in sources.into_iter().rev() {
                 if index < lines.len() {
                     lines.remove(index);
@@ -2997,6 +3221,9 @@ impl Recorder {
         }) else {
             return;
         };
+        let captured_dir = self.result_dir.borrow().clone();
+        let captured_gen = self.meeting_gen.get();
+        let captured_rev = self.transcript_rev.get();
         let toast = adw::Toast::builder()
             .title("Line deleted")
             .button_label("Undo")
@@ -3004,9 +3231,26 @@ impl Recorder {
         let weak = Rc::downgrade(self);
         toast.connect_button_clicked(move |_| {
             let Some(r) = weak.upgrade() else { return };
-            if let Some(dir) = r.result_dir.borrow().clone()
-                && std::fs::write(dir.join("transcript.md"), &before).is_ok()
-            {
+            let current_dir = r.result_dir.borrow().clone();
+            let current_text = current_dir
+                .as_ref()
+                .and_then(|d| std::fs::read_to_string(d.join("transcript.md")).ok());
+            if !undo_applies(
+                captured_dir.as_deref(),
+                current_dir.as_deref(),
+                captured_gen,
+                r.meeting_gen.get(),
+                captured_rev,
+                r.transcript_rev.get(),
+                current_text.as_deref(),
+                &after,
+            ) {
+                r.toast("The transcript changed since; undo refused");
+                return;
+            }
+            let Some(dir) = current_dir else { return };
+            if meeting::atomic_write(&dir.join("transcript.md"), before.as_bytes()).is_ok() {
+                r.transcript_rev.set(r.transcript_rev.get().wrapping_add(1));
                 r.redraw_transcript(&before);
             }
         });
@@ -3203,7 +3447,12 @@ impl Recorder {
         let mut saved = true;
         match std::fs::read_to_string(&transcript) {
             Ok(text) => {
-                if std::fs::write(&transcript, meeting::relabel_all(&text, &renames)).is_err() {
+                if meeting::atomic_write(
+                    &transcript,
+                    meeting::relabel_all(&text, &renames).as_bytes(),
+                )
+                .is_err()
+                {
                     saved = false;
                 }
             }
@@ -3220,6 +3469,8 @@ impl Recorder {
             self.toast("Could not save the speaker names");
             return;
         }
+        self.transcript_rev
+            .set(self.transcript_rev.get().wrapping_add(1));
         if you_changed && let Some(you) = names.first() {
             settings::save_your_name(you);
         }
@@ -3290,8 +3541,12 @@ impl Recorder {
             && let Some(rest) = text.strip_prefix("# ")
         {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
-            if std::fs::write(&transcript, format!("# {title}\n{body}")).is_err() {
+            if meeting::atomic_write(&transcript, format!("# {title}\n{body}").as_bytes()).is_err()
+            {
                 saved = false;
+            } else {
+                self.transcript_rev
+                    .set(self.transcript_rev.get().wrapping_add(1));
             }
         }
         if saved {
@@ -3432,19 +3687,67 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
     platform::meetings_dir().join(format!("{stamp} {}", safe_name(title)))
 }
 
+fn undo_applies(
+    captured_dir: Option<&std::path::Path>,
+    current_dir: Option<&std::path::Path>,
+    captured_gen: u64,
+    current_gen: u64,
+    captured_rev: u64,
+    current_rev: u64,
+    current_text: Option<&str>,
+    expected_after: &str,
+) -> bool {
+    captured_dir == current_dir
+        && captured_gen == current_gen
+        && captured_rev == current_rev
+        && current_text == Some(expected_after)
+}
+
+fn staging_is_stale(modified: Option<std::time::SystemTime>, now: std::time::SystemTime) -> bool {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+    modified.is_some_and(|t| now.duration_since(t).is_ok_and(|age| age >= STALE_AFTER))
+}
+
+/// Exclusive staging folder for a recording: `{started_at}-{nanos}-{pid}-{seq}`
+/// under the cache, created with `create_dir` so two recordings never share
+/// one. `AlreadyExists` retries, any other error is returned.
+fn create_recording_staging(started_at: i64) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::Ordering;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let root = crate::platform::cache_dir().join(APP_NAME);
+    std::fs::create_dir_all(&root)?;
+    for _ in 0..100 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = root.join(format!("{started_at}-{nanos}-{}-{seq}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve a recording folder",
+    ))
+}
+
 /// First free meeting folder for `title`, reserved atomically: `output_dir`,
 /// or with ` 2`, ` 3`, … Two recordings started in the same minute share
 /// the same stamp, so saving without this overwrites the first one; and two
 /// windows saving at once would pick the same suffix with a mere `exists`
 /// check (TOCTOU). `claim` creates the folder (e.g. `std::fs::create_dir`):
-/// the first `Ok` keeps the name, `AlreadyExists` tries the next suffix. Any
-/// other error returns the candidate as-is and lets the caller surface it.
+/// the first `Ok` keeps the name, `AlreadyExists` tries the next suffix up to
+/// 999. Any other error is returned to the caller.
 fn free_output_dir(
     started_at: i64,
     title: &str,
     claim: impl Fn(&PathBuf) -> std::io::Result<()>,
-) -> PathBuf {
-    let mut n = 1;
+) -> std::io::Result<PathBuf> {
+    let mut n = 1u32;
     loop {
         let out = if n == 1 {
             output_dir(started_at, title)
@@ -3452,9 +3755,14 @@ fn free_output_dir(
             output_dir(started_at, &format!("{title} {n}"))
         };
         match claim(&out) {
-            Ok(()) => return out,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-            Err(_) => return out,
+            Ok(()) => return Ok(out),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                n += 1;
+                if n > 999 {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -3667,11 +3975,16 @@ fn purge_import_staging() {
     let Ok(entries) = std::fs::read_dir(crate::platform::cache_dir().join(APP_NAME)) else {
         return;
     };
+    let now = std::time::SystemTime::now();
     for dir in entries.flatten().map(|e| e.path()).filter(|dir| {
         dir.file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with("import-"))
     }) {
-        let _ = std::fs::remove_dir_all(&dir);
+        // Only stale staging: an unreadable mtime is kept, never purged.
+        let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if staging_is_stale(modified, now) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 
@@ -4109,11 +4422,60 @@ mod tests {
     }
 
     #[test]
+    fn undo_needs_same_meeting_and_untouched_text() {
+        use std::path::Path;
+        let dir_a = Path::new("/Meetings/202609241400 A");
+        let dir_b = Path::new("/Meetings/202609241400 B");
+        let applies = |dir: &Path, generation: u64, rev: u64, text: Option<&str>| {
+            undo_applies(Some(dir_a), Some(dir), 7, generation, 3, rev, text, "after")
+        };
+        assert!(applies(dir_a, 7, 3, Some("after")));
+        assert!(!applies(dir_b, 7, 3, Some("after")));
+        assert!(!applies(dir_a, 8, 3, Some("after")));
+        assert!(!applies(dir_a, 7, 4, Some("after")));
+        assert!(!applies(dir_a, 7, 3, Some("after, edited")));
+        assert!(!applies(dir_a, 7, 3, None));
+    }
+
+    #[test]
+    fn only_stale_import_staging_is_purged() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(25 * 3600);
+        let recent = now - Duration::from_secs(3600);
+        assert!(staging_is_stale(Some(old), now));
+        assert!(!staging_is_stale(Some(recent), now));
+        assert!(!staging_is_stale(Some(now), now));
+        assert!(!staging_is_stale(None, now));
+    }
+
+    #[test]
+    fn free_output_dir_numbers_taken_and_reports_denied() {
+        use std::io::{Error, ErrorKind};
+        let taken = || Error::new(ErrorKind::AlreadyExists, "taken");
+        let taken_dir = output_dir(1, "Weekly");
+        let second = free_output_dir(1, "Weekly", |p| {
+            if *p == taken_dir {
+                Err(taken())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(second, output_dir(1, "Weekly 2"));
+        let denied = free_output_dir(1, "Weekly", |_| {
+            Err(Error::new(ErrorKind::PermissionDenied, "denied"))
+        });
+        assert!(denied.is_err());
+        let _ = safe_name("CON");
+    }
+
+    #[test]
     fn recording_folders_get_a_number_when_taken() {
         use std::io::{Error, ErrorKind};
         let taken = || Error::new(ErrorKind::AlreadyExists, "taken");
         let started_at = 1788000000;
-        let free = free_output_dir(started_at, "Weekly", |_| Ok(()));
+        let free = free_output_dir(started_at, "Weekly", |_| Ok(())).unwrap();
         assert_eq!(free, output_dir(started_at, "Weekly"));
         let taken_dir = output_dir(started_at, "Weekly");
         let second = free_output_dir(started_at, "Weekly", |p| {
@@ -4122,7 +4484,8 @@ mod tests {
             } else {
                 Ok(())
             }
-        });
+        })
+        .unwrap();
         assert_eq!(second, output_dir(started_at, "Weekly 2"));
         let second_taken = output_dir(started_at, "Weekly 2");
         let third = free_output_dir(started_at, "Weekly", |p| {
@@ -4131,7 +4494,8 @@ mod tests {
             } else {
                 Ok(())
             }
-        });
+        })
+        .unwrap();
         assert_eq!(third, output_dir(started_at, "Weekly 3"));
     }
 
@@ -4149,7 +4513,8 @@ mod tests {
             } else {
                 Ok(())
             }
-        });
+        })
+        .unwrap();
         assert_eq!(out, output_dir(started_at, "Weekly 2"));
         // The taken name was attempted, then the kept one was claimed.
         assert_eq!(*claimed.borrow(), vec![first, out]);
