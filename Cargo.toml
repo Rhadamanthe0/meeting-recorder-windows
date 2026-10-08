@@ -11,20 +11,22 @@ serde_json = "1.0.151"
 ort = "2.0.0-rc.13"
 realfft = "3"
 ureq = "3.4.2"
-whisper-rs = "0.16"
+whisper-rs = { version = "0.16", features = ["raw-api"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
 [target.'cfg(windows)'.dependencies]
-wasapi = "0.24"
+wasapi = "0.25"
 rodio = "0.19"
 dirs = "6"
 interprocess = "2"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Security", "Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Pipes", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 default = []
+# CI only: generated inputs and a silent output sink; no audio endpoint is opened.
+ci-audio = []
 # GPU transcription through whisper.cpp's Vulkan backend. Needs the Vulkan
 # headers (`vulkan-headers` on Arch) and glslc (`shaderc`) to build.
 vulkan = ["whisper-rs/vulkan"]
@@ -34,5 +36,6 @@ name = "meeting-recorder-windows"
 path = "src/main.rs"
 
 [patch.crates-io]
+whisper-rs = { path = "third-party/whisper-rs" }
 # whisper-rs-sys 0.15.0 vendored sous third-party/ (+3 patchs GNU/MinGW, voir son historique) : pas de dépendance réseau.
 whisper-rs-sys = { path = "third-party/whisper-rs-sys" }

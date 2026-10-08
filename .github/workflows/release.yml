@@ -27,17 +27,26 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Tags + dispatch manuel : jamais de code de fork → PCs du propriétaire.
+    runs-on: [self-hosted, windows, x64, meeting-recorder]
     permissions:
       contents: read
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      # Même locale UTF-8 que le build Windows exécuté en service.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Prépare PowerShell pour le service Windows
+        shell: powershell
+        run: ./.github/scripts/setup-powershell.ps1
 
       # Dispatch manuel : le tag doit exister sur origin, sinon échec.
       # Publier un MSI `X.Y.Z` depuis master quand `vX.Y.Z` n'existe pas est
@@ -93,18 +102,37 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          prefix-key: v1-gnu-no-proxies
+
+      - name: Vérifie GNU après restauration du cache
+        run: |
+          foreach ($tool in @("rustc", "cargo")) {
+            $version = & $tool -Vv
+            if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
+            $version | ForEach-Object { Write-Output $_ }
+            if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
+              throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
+            }
+          }
 
       - name: Install GTK4 (MSYS2 UCRT64)
+        id: msys2-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        env:
+          MSYSTEM: UCRT64
+          __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
         with:
           msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-clang
+          # Même mise à jour complète, sans taskkill global sur le PC.
+          update: false
+          cache: false
+
+      - name: Met à jour MSYS2 et installe GTK sans arrêt global de processus
+        env:
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+        run: ./.github/scripts/install-msys2-packages.ps1 -Root $env:MSYS2_ROOT
 
       # Pas de ffmpeg live au PATH en release : le collector télécharge toujours
       # le ZIP pinné vérifié (GyanD/codexffmpeg 9.0.2, SHA-256 + taille contrôlés,
@@ -113,17 +141,19 @@ jobs:
       # mutable non versionné, exécuté via -version).
 
       - name: Expose GTK au build GNU
+        env:
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
         run: |
           # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
           Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
           Get-ChildItem $env:RUNNER_TEMP -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[ci] tempdir: $($_.FullName)" }
-          $roots = @((Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
+          $roots = @($env:MSYS2_ROOT, (Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
           $p = $null
           try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
           foreach ($r in $roots) {
             Write-Output "[ci] test racine : $r -> $(Test-Path $r)"
             foreach ($sub in @("ucrt64\bin\pkgconf.exe", "msys64\ucrt64\bin\pkgconf.exe", "usr\bin\pkgconf.exe")) {
-              $cand = if ($r) { Join-Path $r $sub } else { $null }
+              $cand = $null; try { if ($r) { $cand = Join-Path $r $sub } } catch { $cand = $null }
               if (-not $p -and $cand -and (Test-Path $cand)) { $p = $cand }
             }
             if (Test-Path $r) { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { Write-Output "[ci] subdir de $r : $($_.Name)" } }
@@ -187,8 +217,8 @@ jobs:
           $env:PATH = "$bin;$env:PATH"
           ffmpeg.exe -version | Select-Object -First 2
 
-      # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
-      # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked
+      # Lockfile autoritaire : Cargo.lock complet commité, dépendances Windows
+      # incluses. --locked
       # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
       # à jour par PR relue, pas en CI.
       # Contrôle sur le lock commité.
@@ -224,21 +254,9 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
-      # seulement si candle est absent.
-      - name: Install WiX v3 (MSI)
-        run: |
-          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-            choco install wixtoolset -y --no-progress
-          }
-          $wixBin = $null
-          foreach ($dir in @("C:\Program Files (x86)\WiX Toolset v3.14\bin", "C:\Program Files (x86)\WiX Toolset v3.11\bin")) {
-            if (Test-Path -LiteralPath $dir) { $wixBin = $dir; break }
-          }
-          if (-not $wixBin) { throw "candle.exe introuvable après choco install wixtoolset" }
-          $wixBin >> $env:GITHUB_PATH
-          $env:PATH = "$wixBin;$env:PATH"
-          candle.exe -? | Select-Object -First 2
+      # WiX v3 portable, pinné et vérifié, sans installation globale sur le PC.
+      - name: Prépare WiX v3 portable (MSI)
+        run: ./.github/scripts/setup-wix.ps1
 
       # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
       # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
@@ -263,8 +281,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "collect-runtime.ps1 exit $LASTEXITCODE (stage partiel refusé)" }
           Set-Location packaging/windows
           heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
+          if ($LASTEXITCODE -ne 0) { throw "heat exit $LASTEXITCODE" }
           candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle exit $LASTEXITCODE" }
           light -ext WixUIExtension -sice:ICE38 -sice:ICE43 -sice:ICE64 -o "MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
+          if ($LASTEXITCODE -ne 0) { throw "light exit $LASTEXITCODE" }
           Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
 
       # Le MSI publié est exactement celui testé ici : installation
@@ -272,32 +293,6 @@ jobs:
       # ucrt64/bin au PATH (la closure embarquée doit suffire), ffmpeg
       # embarqué fonctionnel, puis désinstallation. Mêmes contrôles que
       # windows.yml : un MSI incomplet ne doit jamais atteindre la release.
-      - name: Test MSI per-user (celui qui sera publié)
-        run: |
-          $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
-          if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
-          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
-          $install = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$log`"" -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
-            throw "msiexec /i exit $($install.ExitCode)"
-          }
-          $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
-          if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
-          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
-          $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
-          if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
-          if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt" }
-          Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
-          $ffExe = Join-Path (Split-Path $exe -Parent) "ffmpeg.exe"
-          if (-not (Test-Path -LiteralPath $ffExe)) { throw "ffmpeg.exe embarqué introuvable : $ffExe" }
-          $ffOut = & $ffExe -version 2>&1 | Select-Object -First 3
-          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe embarqué -version exit $LASTEXITCODE" }
-          if (-not $ffOut) { throw "ffmpeg.exe embarqué -version sans sortie (binaire corrompu ?)" }
-          $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
-          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }
-
       - name: Upload MSI Windows x86_64
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -308,7 +303,7 @@ jobs:
           path: packaging/windows/*.msi
 
   release:
-    needs: build
+    needs: [build, verify-msi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -335,3 +330,41 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify-msi:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Download MSI construit
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-msi
+          path: packaging/windows
+      - name: Test MSI per-user (celui qui sera publié)
+        run: |
+          $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
+          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$log`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
+            throw "msiexec /i exit $($install.ExitCode)"
+          }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
+          $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
+          if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
+          if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt" }
+          Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
+          $ffExe = Join-Path (Split-Path $exe -Parent) "ffmpeg.exe"
+          if (-not (Test-Path -LiteralPath $ffExe)) { throw "ffmpeg.exe embarqué introuvable : $ffExe" }
+          $ffOut = & $ffExe -version 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe embarqué -version exit $LASTEXITCODE" }
+          if (-not $ffOut) { throw "ffmpeg.exe embarqué -version sans sortie (binaire corrompu ?)" }
+          $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }

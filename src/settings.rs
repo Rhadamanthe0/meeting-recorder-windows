@@ -72,6 +72,7 @@ pub fn save_your_name(name: &str) {
 }
 
 /// Whether the app already asked to put its widget in the bar.
+#[cfg(not(target_os = "windows"))]
 pub fn bar_widget_offered() -> bool {
     load()["bar_widget_offered"].as_str() == Some("yes")
 }
@@ -82,6 +83,7 @@ pub fn set_bar_widget_offered() {
 
 /// The saved capture device for `which` (e.g. "mic" or "loopback"): the
 /// stable WASAPI endpoint id, never the friendly name.
+#[cfg(target_os = "windows")]
 pub fn load_capture_device(which: &str) -> Option<String> {
     let settings = load();
     let key = format!("capture_device_{which}");

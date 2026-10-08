@@ -144,17 +144,45 @@ pub fn clock(ms: i64) -> String {
     }
 }
 
-fn parse_clock(text: &str) -> Option<i64> {
+pub(crate) fn parse_clock(text: &str) -> Option<i64> {
     let mut total = 0i64;
+    let mut count = 0;
     for part in text.trim().split(':') {
-        total = total * 60 + part.trim().parse::<i64>().ok()?;
+        count += 1;
+        let part = part.trim();
+        if count > 3 || part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        total = total
+            .checked_mul(60)?
+            .checked_add(part.parse::<i64>().ok()?)?;
     }
-    Some(total * 1000)
+    // The player also converts this to microseconds. Reject times that
+    // cannot be represented there instead of overflowing on an imported file.
+    total.checked_mul(1_000_000)?;
+    total.checked_mul(1000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_or_overflowing_times_are_rejected() {
+        for time in [
+            "",
+            "-1:00",
+            "xx:12",
+            "1::2",
+            "1:2:3:4",
+            "9223372036854775807",
+            "999999999999:00",
+        ] {
+            assert_eq!(parse_clock(time), None, "{time}");
+        }
+        assert_eq!(parse_clock("1:02:03"), Some(3_723_000));
+        assert_eq!(parse_clock("01:23"), Some(83_000));
+    }
 
     #[test]
     fn parses_fenced_json_and_snaps_to_lines() {

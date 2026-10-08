@@ -41,9 +41,30 @@ GAIN = {"You": 0.8, "Dave": 0.55, "Anna": 0.9, "Ben": 0.7, "Carla": 1.0,
         "Kristin": 0.9, "Norman": 0.75, "Cori": 0.85}
 
 
+def speech_bounds(samples: list[float], rate: int = RATE) -> tuple[int, int]:
+    """Exclude only boundary silence from an utterance's reference interval.
+
+    Piper can produce near-silent tails after the last phoneme. Measure 10 ms
+    RMS blocks at 60 dB below the clip's peak, bounded by the 16-bit PCM
+    quantization step, and retain 100 ms on either side. Internal pauses and
+    the original audio/placement are untouched; this is not a diarizer VAD.
+    """
+    blocks = [(i * rate // 100, min(len(samples), (i + 1) * rate // 100))
+              for i in range(math.ceil(len(samples) * 100 / rate))]
+    levels = [math.sqrt(sum(s * s for s in samples[start:end]) / (end - start))
+              for start, end in blocks]
+    floor = max(1 / 32768, max(levels, default=0) / 1000)
+    active = [i for i, level in enumerate(levels) if level > floor]
+    if not active:
+        raise ValueError("Piper produced no speech above the PCM quantization floor")
+    padding = rate // 10
+    return (max(0, blocks[active[0]][0] - padding),
+            min(len(samples), blocks[active[-1]][1] + padding))
+
+
 def synth(voices: Path, voice: str, text: str, tmp: Path) -> list[float]:
     out = tmp / "line.wav"
-    subprocess.run(["piper-tts", "--model", str(voices / f"{voice}.onnx"), "--output_file", str(out)],
+    subprocess.run([sys.executable, "-m", "piper", "--model", str(voices / f"{voice}.onnx"), "--output_file", str(out)],
                    input=text.encode(), check=True, capture_output=True)
     with wave.open(str(out)) as w:
         assert w.getframerate() == RATE, voice
@@ -64,11 +85,13 @@ def render(voices: Path, script: str, tmp: Path):
     mic, computer, truth = [0.0] * n, [0.0] * n, []
     for who, start, samples, text in clips:
         at = int(start * RATE)
+        speech_start, speech_end = speech_bounds(samples)
         track = mic if who in LOCAL else computer
         for i, s in enumerate(samples):
             track[at + i] += s * GAIN[who]
         truth.append({"speaker": who, "side": "mic" if who in LOCAL else "computer",
-                      "start": round(start, 2), "end": round(start + len(samples) / RATE, 2),
+                      "start": round(start + speech_start / RATE, 2),
+                      "end": round(start + speech_end / RATE, 2),
                       "text": text})
     return mic, computer, truth
 

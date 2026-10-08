@@ -12,9 +12,46 @@ built binary and the models; this file needs only the standard library.
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run import check, edit_distance, score_text, score_turns, wer_cer, words
+from generate import RATE, render, speech_bounds
+
+
+class ReferenceIntervals(unittest.TestCase):
+    def test_boundary_silence_is_not_labelled_as_speech(self):
+        samples = [0.0] * 4000 + [0.1] * 4000 + [0.0] * 4000
+        original = samples.copy()
+        self.assertEqual(speech_bounds(samples, 10000), (3000, 9000))
+        self.assertEqual(samples, original)
+
+    def test_internal_pauses_and_quiet_speech_are_kept(self):
+        # Above one PCM step, but far quieter than ordinary synthesized speech.
+        samples = [2 / 32768] * 2000 + [0.0] * 8000 + [2 / 32768] * 2000
+        self.assertEqual(speech_bounds(samples, 10000), (0, len(samples)))
+
+    def test_short_reply_is_not_dropped(self):
+        samples = [0.0] * 1000 + [0.01] * 200 + [0.0] * 1000
+        self.assertEqual(speech_bounds(samples, 10000), (0, 2200))
+
+    def test_empty_or_unrepresentable_speech_is_rejected(self):
+        for samples in ([], [0.0] * 1000, [0.5 / 32768] * 1000):
+            with self.subTest(samples=len(samples)):
+                with self.assertRaises(ValueError):
+                    speech_bounds(samples)
+
+    def test_reference_trimming_preserves_audio_and_next_clip_placement(self):
+        clip = [0.1] * RATE + [0.0] * RATE
+        with patch("generate.synth", return_value=clip), \
+             patch("builtins.open", return_value=["You|0.5|Hello.\n", "Anna|0.5|Hi.\n"]):
+            mic, computer, truth = render(Path("unused"), "unused", Path("unused"))
+        self.assertEqual(truth[0]["start"], 0.5)
+        self.assertEqual(truth[0]["end"], 1.6)
+        self.assertEqual(truth[1]["start"], 3.0)
+        self.assertEqual(truth[1]["end"], 4.1)
+        self.assertAlmostEqual(mic[int(0.5 * RATE)], 0.08)
+        self.assertAlmostEqual(computer[3 * RATE], 0.09)
 
 
 def md(*lines):
@@ -142,6 +179,16 @@ class ShortReplies(unittest.TestCase):
 
 
 class Thresholds(unittest.TestCase):
+    def test_errors_fail_even_without_thresholds(self):
+        self.assertEqual(check({"ami": {"error": "process failed"}}, {}),
+                         ["ami: process failed"])
+
+    def test_missing_measurements_do_not_pass(self):
+        limits = {"min": {"found": 0}, "max": {"lines": 0}, "all_speakers": True}
+        failures = check({"case": {}}, {"case": limits})
+        self.assertEqual(len(failures), 3)
+        self.assertTrue(all("missing" in failure for failure in failures))
+
     def test_checker_catches_low_recall_and_high_wer(self):
         thresholds = {"case": {"min": {"found": 0.9, "person": 0.9},
                                "max": {"leaked": 0, "wer": 0.2}}}

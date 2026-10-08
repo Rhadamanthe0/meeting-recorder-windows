@@ -234,15 +234,73 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
 /// Writes the manifest into `dir`, replacing one with another name (after a rename).
 pub fn write(dir: &Path, manifest: &Manifest) -> std::io::Result<PathBuf> {
     let target = path_for(dir, &manifest.title);
-    let old = find(dir);
+    let old = find(dir).filter(|old| {
+        old != &target
+            // On Windows, a case-only title change still names the same file.
+            // Deleting the old spelling after replacement would delete it.
+            && !matches!(
+                (old.canonicalize(), target.canonicalize()),
+                (Ok(old), Ok(target)) if old == target
+            )
+    });
+    if old.is_some() && target.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another meeting manifest already exists at the new title",
+        ));
+    }
     let text = serde_json::to_string_pretty(&manifest.to_json()).unwrap_or_default() + "\n";
     atomic_write(&target, text.as_bytes())?;
     if let Some(old) = old
-        && old != target
+        && let Err(error) = std::fs::remove_file(&old)
     {
-        let _ = std::fs::remove_file(old);
+        // Keep the previous manifest authoritative if its deletion fails.
+        // Otherwise reopening the folder could pick either title at random.
+        if let Err(rollback) = std::fs::remove_file(&target) {
+            return Err(std::io::Error::other(format!(
+                "could not replace the previous manifest: {error}; could not remove the new manifest: {rollback}"
+            )));
+        }
+        return Err(error);
     }
     Ok(target)
+}
+
+/// Save a new transcript before its metadata, restoring the previous text if
+/// metadata cannot be saved. The caller commits its in-memory manifest only
+/// after this succeeds. This handles I/O failures, not a crash between writes.
+pub fn write_transcript(
+    dir: &Path,
+    manifest: Option<&Manifest>,
+    contents: &[u8],
+) -> Result<(), String> {
+    let target = dir.join("transcript.md");
+    let previous = if manifest.is_some() {
+        match std::fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("could not read the previous transcript: {error}")),
+        }
+    } else {
+        None
+    };
+    atomic_write(&target, contents)
+        .map_err(|error| format!("could not write the transcript: {error}"))?;
+    if let Some(manifest) = manifest
+        && let Err(error) = write(dir, manifest)
+    {
+        let restored = match previous {
+            Some(bytes) => atomic_write(&target, &bytes),
+            None => std::fs::remove_file(&target),
+        };
+        return Err(match restored {
+            Ok(()) => format!("could not save the meeting file: {error}"),
+            Err(rollback) => format!(
+                "could not save the meeting file: {error}; could not restore the previous transcript: {rollback}; check the meeting files"
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -276,11 +334,11 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         file.sync_data()?;
         Ok(())
     })();
+    drop(file);
     if write_result.is_err() {
         let _ = std::fs::remove_file(&tmp);
         return write_result;
     }
-    drop(file);
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -439,10 +497,7 @@ mod tests {
         first.title = "Alpha".into();
         let old = super::write(&dir, &first).unwrap();
         assert!(old.exists());
-        assert_eq!(
-            std::fs::read_to_string(&old).unwrap().contains("Alpha"),
-            true
-        );
+        assert!(std::fs::read_to_string(&old).unwrap().contains("Alpha"));
         let mut second = first.clone();
         second.title = "Beta".into();
         let new = super::write(&dir, &second).unwrap();
@@ -451,5 +506,111 @@ mod tests {
         assert!(!old.exists());
         assert!(std::fs::read_to_string(&new).unwrap().contains("Beta"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcript_and_metadata_keep_the_previous_pair_on_save_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "verify-transcript-pair-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let mut original =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        original.title = "Alpha".into();
+        super::write(&dir, &original).unwrap();
+        let mut updated = original.clone();
+        updated.speakers = vec!["New name".into(), "Other name".into()];
+        let transcript = dir.join("transcript.md");
+
+        // An unreadable transcript must not change persisted speaker names.
+        std::fs::create_dir(&transcript).unwrap();
+        assert!(super::write_transcript(&dir, Some(&updated), b"new text").is_err());
+        assert_eq!(super::open(&dir).unwrap().1.speakers, original.speakers);
+        std::fs::remove_dir(&transcript).unwrap();
+
+        // A manifest collision must restore the exact old bytes, including
+        // text a previous version cannot parse, or remove a first transcript.
+        updated.title = "Beta".into();
+        let collision = super::path_for(&dir, &updated.title);
+        std::fs::create_dir(&collision).unwrap();
+        let old_text = b"# Alpha\n\nold text\xff\n";
+        std::fs::write(&transcript, old_text).unwrap();
+        assert!(super::write_transcript(&dir, Some(&updated), b"new text").is_err());
+        assert_eq!(std::fs::read(&transcript).unwrap(), old_text);
+        assert_eq!(super::open(&dir).unwrap().1.title, original.title);
+        std::fs::remove_file(&transcript).unwrap();
+        assert!(super::write_transcript(&dir, Some(&updated), b"new text").is_err());
+        assert!(!transcript.exists());
+        assert!(collision.is_dir());
+
+        // A successful save commits both files; a metadata-free save still
+        // supports legacy meetings.
+        std::fs::remove_dir(&collision).unwrap();
+        super::write_transcript(&dir, Some(&updated), b"new text").unwrap();
+        assert_eq!(std::fs::read(&transcript).unwrap(), b"new text");
+        assert_eq!(super::open(&dir).unwrap().1.speakers, updated.speakers);
+        super::write_transcript(&dir, None, b"legacy text").unwrap();
+        assert_eq!(std::fs::read(&transcript).unwrap(), b"legacy text");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_case_only_title_change_keeps_the_manifest() {
+        let dir = std::env::temp_dir().join(format!("verify-manifest-case-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        manifest.title = "Alpha".into();
+        super::write(&dir, &manifest).unwrap();
+        manifest.title = "alpha".into();
+        let target = super::write(&dir, &manifest).unwrap();
+        assert!(target.is_file());
+        assert_eq!(
+            super::Manifest::from_json(
+                &serde_json::from_str(
+                    &std::fs::read_to_string(super::find(&dir).unwrap()).unwrap()
+                )
+                .unwrap()
+            )
+            .unwrap()
+            .title,
+            "alpha"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_manifest_removal_keeps_only_the_old_title() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("verify-manifest-readonly-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        manifest.title = "Alpha".into();
+        let old = super::write(&dir, &manifest).unwrap();
+        // Rust can delete read-only files on modern Windows. A live handle
+        // shared for reads/writes but not deletion forces a real sharing
+        // violation, independent of the filesystem's read-only behavior.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE, no DELETE.
+            .open(&old)
+            .unwrap();
+        manifest.title = "Beta".into();
+        let result = super::write(&dir, &manifest);
+        drop(lock);
+        assert!(result.is_err());
+        assert!(old.is_file());
+        assert!(!super::path_for(&dir, "Beta").exists());
+        assert_eq!(super::open(&dir).unwrap().1.title, "Alpha");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

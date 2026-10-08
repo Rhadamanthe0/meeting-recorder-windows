@@ -4,10 +4,10 @@ A small test suite for the transcription and the speakers: it runs the app's own
 
 ```bash
 cargo build --release
-bench/run.py                          # the six cases in fixtures/, about two minutes
+bench/run.py                          # the six cases in fixtures/, duration depends on CPU and model
 bench/run.py --ami                    # plus the first 5 minutes of a real AMI meeting (downloads about 170 MB once)
 bench/run.py --ami --ami-minutes 0    # the whole 17 minute meeting
-bench/run.py --ami --check            # fail when a case scores below thresholds.json, as CI does
+bench/run.py --ami --check            # fail when a case scores below thresholds.json
 bench/run.py --bin /usr/bin/omarchy-meeting-recorder --json old.json    # any other build
 bench/run.py --case room music        # only some cases
 ```
@@ -46,17 +46,40 @@ For AMI there is no script, so side and person are measured by who was speaking 
 
 ## In CI
 
-The automated checks run `bench/tests.py` in CI via `.github/workflows/windows.yml`. There is no `bench.yml`: the audio bench above is manual, it needs microphones, speakers and minutes of audio that CI does not have. Run it locally before changing transcription, diarization or scoring, and keep `thresholds.json` honest with what you measured.
+The automated checks run `bench/tests.py` in CI via `.github/workflows/windows.yml`. There is no `bench.yml`: the full audio bench above is manual and needs the built binary, ffmpeg, the models and processing time. It reads the committed fixtures and does not require a microphone or speakers. Run it locally before changing transcription, diarization or scoring, and keep `thresholds.json` honest with what you measured.
 
 ## Making new cases
 
 The fixtures are generated from the scripts in `scripts/`, meetings of a small team working on Omarchy, with [piper](https://github.com/OHF-Voice/piper1-gpl) voices that are in the public domain or CC0 (Joe, John, Kristin, Norman and Cori from [piper-voices](https://huggingface.co/rhasspy/piper-voices)):
+
+Install `piper-tts` in the Python environment used to run the generator, put
+FFmpeg on PATH, and download both the `.onnx` and `.onnx.json` files for each
+voice into the voices directory. The generator invokes `python -m piper` and
+writes WAV files; it does not play audio.
 
 ```bash
 bench/generate.py ~/path/to/piper-voices
 ```
 
 A script line is `speaker|gap|text`, where the gap is the seconds after the previous line ends; a negative gap makes them talk at the same time. The generated files are committed, so running the bench does not need piper.
+
+Reference intervals describe speech, rather than the entire Piper WAV: the
+generator excludes only leading/trailing near-silence, using 10 ms RMS blocks
+60 dB below each clip's peak (never below one 16-bit PCM step), with 100 ms
+padding. Internal pauses, short replies, audio samples and clip placement are
+preserved. The padding also protects quiet phoneme endings. A silent or
+unrepresentable synthesized line stops generation instead of becoming a speech
+reference.
+
+The shared `call`, `call-speakers` and `import` references were corrected on
+8 October 2026, using their existing clean mixed `import/audio.ogg`, decoded
+by FFmpeg to mono 16 kHz float PCM, and the same boundary rule within each
+original interval. Overlapping speech is retained conservatively. Audio files,
+words, speakers, scoring and thresholds were not changed. Independently,
+Wav2Vec2 CTC confirmed the final words precede the near-silent tails; its output
+was diagnostic only and was not used to generate the reference intervals.
+The short `Ben: Yeah.` remains in the reference and contributes to errors when
+missed. See [audit evidence](../docs/AUDIT.md) for the model revision and results.
 
 ## Licenses
 

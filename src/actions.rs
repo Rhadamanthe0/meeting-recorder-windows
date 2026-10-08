@@ -24,8 +24,7 @@ use std::time::{Duration, Instant};
 use crate::meeting::Manifest;
 use crate::platform::silent_command;
 
-#[path = "action_process.rs"]
-mod process;
+use crate::action_process as process;
 
 /// How actions work, for people and their agents; the done page links here
 /// when there are none yet.
@@ -90,7 +89,7 @@ fn parse(text: &str) -> Vec<Action> {
 }
 
 /// A TOML string: `"..."` with backslash escapes, or `'...'` taken literally.
-fn unquote(value: &str) -> String {
+pub(crate) fn unquote(value: &str) -> String {
     if let Some(inner) = value.strip_prefix('\'').and_then(|v| v.split('\'').next()) {
         return inner.to_owned();
     }
@@ -164,6 +163,10 @@ fn run_with_timeout(
     manifest: &Manifest,
     timeout: Duration,
 ) -> Result<Outcome, String> {
+    // The shell changes its working directory. Resolve paths first so
+    // MEETING_* and Unix $1 still refer to this meeting for relative CLI input.
+    let dir = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+    let dir = dir.as_path();
     let date = gtk::glib::DateTime::from_unix_local(manifest.started_at)
         .and_then(|t| t.format("%Y-%m-%d %H:%M"))
         .map(|s| s.to_string())
@@ -172,10 +175,12 @@ fn run_with_timeout(
         .iter()
         .map(|f| dir.join(f))
         .find(|p| p.exists());
+    #[cfg(not(target_os = "windows"))]
     let mut shell = silent_command("sh");
     #[cfg(target_os = "windows")]
+    let mut shell = silent_command("cmd");
+    #[cfg(target_os = "windows")]
     {
-        shell = silent_command("cmd");
         shell.arg("/C").arg(&action.command);
     }
     #[cfg(not(target_os = "windows"))]
@@ -372,7 +377,7 @@ mod tests {
             }
             return;
         }
-        let child = silent_command(std::env::current_exe().unwrap())
+        let mut child = silent_command(std::env::current_exe().unwrap())
             .args([
                 "actions::tests::descendant_fixture",
                 "--exact",
@@ -382,6 +387,12 @@ mod tests {
             .spawn()
             .unwrap();
         std::fs::write("descendant.pid", child.id().to_string()).unwrap();
+        // Reap a child that finishes early. In the "exited" fixture the
+        // parent can still exit immediately, leaving its child alive:
+        // the action's Job Object must clean it up.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         if mode == "running" {
             std::thread::sleep(Duration::from_secs(30));
         }
@@ -524,6 +535,15 @@ name = "not an action"
         .unwrap();
         assert_eq!(named.message, "Weekly by Maya");
         assert!(named.url.is_none());
+        // The shell runs inside the meeting: a relative argument must not
+        // make MEETING_TRANSCRIPT resolve relative to that folder again.
+        let relative = std::path::PathBuf::from("target")
+            .join(format!("relative-action-{}", std::process::id()));
+        std::fs::create_dir_all(&relative).unwrap();
+        std::fs::write(relative.join("transcript.md"), "Relative meeting").unwrap();
+        let read = run(&action("cat \"$MEETING_TRANSCRIPT\""), &relative, &manifest).unwrap();
+        assert_eq!(read.message, "Relative meeting");
+        std::fs::remove_dir_all(&relative).unwrap();
         let failed = run(&action("echo nope >&2; exit 3"), &dir, &manifest);
         assert_eq!(failed.err().as_deref(), Some("nope"));
         let noisy = run(

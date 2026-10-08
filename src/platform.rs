@@ -15,6 +15,26 @@ use std::process::Command;
 
 use crate::APP_NAME;
 
+/// Use the MSI's GTK schemas for this process only. A global user
+/// GSETTINGS_SCHEMA_DIR would also override every other GTK application.
+#[cfg(target_os = "windows")]
+pub fn configure_bundled_schemas() {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+    else {
+        return;
+    };
+    let schemas = dir.join("share/glib-2.0/schemas");
+    if schemas.join("gschemas.compiled").is_file() {
+        // SAFETY: Windows supports concurrent environment mutation. This
+        // is also called at startup, before the application starts workers.
+        unsafe {
+            std::env::set_var("GSETTINGS_SCHEMA_DIR", schemas);
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn dirs_or(home_fallback: &str) -> PathBuf {
     glib_fallback_home().join(home_fallback)
@@ -104,17 +124,10 @@ pub fn models_dir() -> PathBuf {
     data_dir().join(APP_NAME).join("models")
 }
 
-/// Dossier runtime (socket Unix sur Linux ; sur Windows l'IPC passe par un
-/// named pipe, ce dossier n'est qu'un repli pour fichiers temporaires).
+/// Dossier runtime du socket Unix ; Windows utilise un named pipe.
+#[cfg(not(target_os = "windows"))]
 pub fn runtime_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::temp_dir().join(APP_NAME)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        gtk::glib::user_runtime_dir()
-    }
+    gtk::glib::user_runtime_dir()
 }
 
 /// Ouvre une URI (page web, dossier `file://`, `obsidian://`, …) dans
@@ -172,14 +185,17 @@ pub fn open_uri(uri: &str) -> std::io::Result<()> {
 /// sans `CREATE_NO_WINDOW` chaque spawn ouvre un flash de console. Sur Unix,
 /// simple passthrough de `Command::new` (args/stdio inchangés aux call sites).
 pub fn silent_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
         // CREATE_NO_WINDOW (0x08000000) : pas de console, pas de flash.
         // Constante en littéral pour ne pas ajouter de dépendance.
         use std::os::windows::process::CommandExt;
+        let mut command = command;
         command.creation_flags(0x08000000);
+        command
     }
+    #[cfg(not(target_os = "windows"))]
     command
 }
 

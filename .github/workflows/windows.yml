@@ -5,28 +5,43 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      hosted:
+        description: "Utiliser une VM Windows GitHub si le runner personnel est indisponible"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 # Un push annule le run precedent de la meme ref (package MSI couteux).
 concurrency:
-  group: windows-${{ github.ref }}
+  group: windows-${{ github.ref }}-${{ inputs.hosted && 'hosted' || 'local' }}
   cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Push et PR internes → PCs du propriétaire ; PRs de forks (code arbitraire) → GitHub.
+    runs-on: ${{ (inputs.hosted || github.event.pull_request.head.repo.fork) && 'windows-latest' || fromJSON('["self-hosted", "windows", "x64", "meeting-recorder"]') }}
     permissions:
       contents: read
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      # Le compte de service français « Système » a un nom non ASCII.
+      # Les outils natifs MSYS2 doivent interpréter ses chemins en UTF-8.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Prépare PowerShell pour le service Windows
+        shell: powershell
+        run: ./.github/scripts/setup-powershell.ps1
 
       # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
       # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
@@ -39,7 +54,7 @@ jobs:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
           # Éteint le warning rustfmt non fatal vu en log CI.
-          # clippy : requis par le step informatif "Clippy" ci-dessous.
+          # clippy : requis par le contrôle d'analyse statique ci-dessous.
           components: rustfmt, clippy
 
       - name: Affiche la toolchain (hôte GNU attendu)
@@ -47,18 +62,42 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Garder les compilations déjà réussies lorsqu'un test échoue ;
+          # les validations restent toutes réexécutées au run suivant.
+          cache-on-failure: true
+          # Le cache précédent remplaçait les proxies rustup par des liens
+          # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
+          cache-bin: false
+          prefix-key: v1-gnu-no-proxies
+
+      - name: Vérifie GNU après restauration du cache
+        run: |
+          foreach ($tool in @("rustc", "cargo")) {
+            $version = & $tool -Vv
+            if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
+            $version | ForEach-Object { Write-Output $_ }
+            if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
+              throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
+            }
+          }
 
       - name: Install GTK4 (MSYS2 UCRT64)
+        id: msys2-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        env:
+          MSYSTEM: UCRT64
+          __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
         with:
           msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-clang
+          # La mise à jour complète est effectuée ci-dessous sans taskkill global.
+          update: false
+          cache: false
+
+      - name: Met à jour MSYS2 et installe GTK sans arrêt global de processus
+        env:
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+        run: ./.github/scripts/install-msys2-packages.ps1 -Root $env:MSYS2_ROOT
 
       # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
       # ZIP pinné vérifié (pas de winget live mutable) : même pin que
@@ -89,17 +128,19 @@ jobs:
 
       # Expose pkg-config + gcc UCRT64 au build cargo (hôte GNU par défaut).
       - name: Expose GTK au build GNU
+        env:
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
         run: |
           # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
           Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
           Get-ChildItem $env:RUNNER_TEMP -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[ci] tempdir: $($_.FullName)" }
-          $roots = @((Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
+          $roots = @($env:MSYS2_ROOT, (Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
           $p = $null
           try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
           foreach ($r in $roots) {
             Write-Output "[ci] test racine : $r -> $(Test-Path $r)"
             foreach ($sub in @("ucrt64\bin\pkgconf.exe", "msys64\ucrt64\bin\pkgconf.exe", "usr\bin\pkgconf.exe")) {
-              $cand = if ($r) { Join-Path $r $sub } else { $null }
+              $cand = $null; try { if ($r) { $cand = Join-Path $r $sub } } catch { $cand = $null }
               if (-not $p -and $cand -and (Test-Path $cand)) { $p = $cand }
             }
             if (Test-Path $r) { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { Write-Output "[ci] subdir de $r : $($_.Name)" } }
@@ -141,8 +182,8 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
-      # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
-      # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked
+      # Lockfile autoritaire : Cargo.lock complet commité, dépendances Windows
+      # incluses. --locked
       # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
       # à jour par PR relue, pas en CI.
       # Guard A (bloquant) : tout spawn Windows doit passer par
@@ -167,7 +208,7 @@ jobs:
               $all = Get-Content -LiteralPath $file
               $from = [Math]::Max(0, $line - 41)
               $ctx = @($all | Select-Object -First 3) + @($all | Select-Object -Skip $from -First 40)
-              $gated = @($ctx | Where-Object { $_ -match 'cfg\s*\(\s*(not\s*\(\s*target_os\s*=\s*"windows"\s*\)|target_os\s*=\s*"linux")' }).Count -gt 0
+              $gated = @($ctx | Where-Object { $_ -match 'cfg\s*\(\s*(all\s*\(\s*test\s*,\s*unix|unix|not\s*\(\s*target_os\s*=\s*"windows"\s*\)|target_os\s*=\s*"linux")' }).Count -gt 0
               if ($gated) { Write-Output "[ci] hit Unix-only toléré : $h" }
               else { $bad += $h }
             } else { $bad += $h }
@@ -203,21 +244,47 @@ jobs:
 
       # Contrôle sur le lock commité.
       - name: Check
-        run: cargo check --locked
+        run: |
+          # Un service peut résoudre une autre installation que la session utilisateur.
+          # Garder un diagnostic du binaire réellement lancé si Windows le refuse.
+          $cargo = (Get-Command cargo.exe -ErrorAction Stop).Source
+          $item = Get-Item -LiteralPath $cargo
+          Write-Output "[ci] cargo=$cargo bytes=$($item.Length)"
+          Write-Output "[ci] cargo SHA256=$((Get-FileHash -LiteralPath $cargo -Algorithm SHA256).Hash)"
+          try {
+            & $cargo check --locked
+            if ($LASTEXITCODE -ne 0) { throw "cargo check a échoué : $LASTEXITCODE" }
+          } catch {
+            $errorObject = $_.Exception
+            while ($errorObject) {
+              Write-Output "[ci] $($errorObject.GetType().FullName): $($errorObject.Message)"
+              if ($errorObject -is [System.ComponentModel.Win32Exception]) {
+                Write-Output "[ci] NativeErrorCode=$($errorObject.NativeErrorCode)"
+              }
+              $errorObject = $errorObject.InnerException
+            }
+            throw
+          }
 
       - name: Test
         run: cargo test --locked
 
-      # Clippy informatif (NON BLOQUANT, continue-on-error) : relève les
-      # warnings sans gater tant que le socle n'est pas clean ; gating futur
-      # envisagé une fois le bruit résorbé.
-      - name: Clippy (informatif, non bloquant)
-        continue-on-error: true
+      # Les diagnostics Windows sont corrigés : un échec doit bloquer la CI.
+      - name: Clippy (bloquant)
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      # Ces contrôles ne doivent pas attendre que le packaging MSI réussisse.
+      - name: Test audio synthétique (aucun périphérique réel)
+        run: |
+          cargo test --locked --features ci-audio
+          if ($LASTEXITCODE -ne 0) { throw "Tests ci-audio en échec" }
+          cargo clippy --locked --all-targets --features ci-audio -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "Clippy ci-audio en échec" }
 
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
       - name: Diagnostic libs statiques
         if: always()
+        shell: powershell
         run: |
           Write-Output "[ci] OUT_DIR whisper-rs-sys :"
           Get-ChildItem -Path "target/debug/build" -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("[ci] out: " + $_.FullName) }
@@ -238,7 +305,8 @@ jobs:
           if (-not (Test-Path -LiteralPath $objdump)) { throw "objdump.exe introuvable ($objdump) : impossible de vérifier le subsystem PE" }
           $hdr = & $objdump -p target/release/meeting-recorder-windows.exe
           if ($LASTEXITCODE -ne 0) { throw "objdump -p exit $LASTEXITCODE" }
-          $hdr | ForEach-Object { Write-Output "[ci] objdump: $_" }
+          # Le dump complet générait plus de 40 Mo de logs d'imports.
+          $hdr | Where-Object { $_ -match 'Subsystem' } | ForEach-Object { Write-Output "[ci] objdump: $_" }
           if (-not ($hdr | Where-Object { $_ -match 'Subsystem\s+.*Windows GUI' })) { throw "subsystem PE inattendu (pas Windows GUI) : l'exe ouvrirait une console au double-clic" }
           Write-Output "[ci] guard subsystem GUI OK"
 
@@ -256,47 +324,134 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
-      # seulement si candle est absent.
-      - name: Install WiX v3 (MSI)
-        run: |
-          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-            choco install wixtoolset -y --no-progress
-          }
-          $wixBin = $null
-          foreach ($dir in @("C:\Program Files (x86)\WiX Toolset v3.14\bin", "C:\Program Files (x86)\WiX Toolset v3.11\bin")) {
-            if (Test-Path -LiteralPath $dir) { $wixBin = $dir; break }
-          }
-          if (-not $wixBin) { throw "candle.exe introuvable après choco install wixtoolset" }
-          $wixBin >> $env:GITHUB_PATH
-          $env:PATH = "$wixBin;$env:PATH"
-          candle.exe -? | Select-Object -First 2
+      # WiX v3 portable, pinné et vérifié, sans installation globale sur le PC.
+      - name: Prépare WiX v3 portable (MSI)
+        run: ./.github/scripts/setup-wix.ps1
 
       # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
       # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
-      # Version = tag sans le v initial, sinon 0.1.0 (sur master : pas de tag).
+      # Version du code construit, y compris sur une branche sans tag.
       - name: Build MSI
         run: |
-          $version = "0.1.0"
+          $version = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+          if (-not $version) { throw "version introuvable dans Cargo.toml" }
           $ref = $env:GITHUB_REF_NAME
-          if ($ref -match '^v?(\d+(?:\.\d+)*)$') {
-            $parts = @($Matches[1] -split '\.')
-            while ($parts.Count -lt 3) { $parts += "0" }
-            $version = ($parts[0..2] -join ".")
-          }
           Write-Output "[ci] msi version=$version (ref=$ref)"
           powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/collect-runtime.ps1
           if ($LASTEXITCODE -ne 0) { throw "collect-runtime.ps1 exit $LASTEXITCODE (stage partiel refusé)" }
           Set-Location packaging/windows
           heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
+          if ($LASTEXITCODE -ne 0) { throw "heat exit $LASTEXITCODE" }
           candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle exit $LASTEXITCODE" }
           light -ext WixUIExtension -sice:ICE38 -sice:ICE43 -sice:ICE64 -o "MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
+          if ($LASTEXITCODE -ne 0) { throw "light exit $LASTEXITCODE" }
           Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
 
-      # Preuve d'installation : MSI per-user silencieux puis lancement de
+      # Le binaire normal ne doit jamais être lancé sans arguments sur le PC.
+      # La version ci-audio génère des tons et utilise une sortie silencieuse.
+      - name: Build test audio synthétique (aucun périphérique réel)
+        run: |
+          cargo build --release --locked --features ci-audio
+          if ($LASTEXITCODE -ne 0) { throw "Build ci-audio en échec" }
+          $versionLog = Join-Path $env:RUNNER_TEMP "meeting-recorder-synthetic-version.log"
+          $probe = Start-Process -FilePath target/release/meeting-recorder-windows.exe -ArgumentList "--version" -PassThru -NoNewWindow -RedirectStandardOutput $versionLog
+          try {
+            if (-not $probe.WaitForExit(10000)) {
+              Stop-Process -Id $probe.Id -Force
+              throw "Vérification de version expirée : lancement GUI refusé"
+            }
+            $version = Get-Content -LiteralPath $versionLog
+            if ($probe.ExitCode -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
+              throw "Binaire synthétique requis : lancement GUI refusé"
+            }
+          } finally { $probe.Dispose() }
+
+      # Le service Windows n'a pas de bureau interactif. Seul le runtime
+      # synthétique est transmis à une VM GitHub pour vérifier le rendu.
+      - name: Prépare le runtime GUI synthétique
+        run: |
+          $testStage = Join-Path $env:GITHUB_WORKSPACE "synthetic-runtime"
+          New-Item -ItemType Directory -Path $testStage | Out-Null
+          Copy-Item packaging/windows/stage/* $testStage -Recurse
+          Copy-Item target/release/meeting-recorder-windows.exe (Join-Path $testStage "meeting-recorder-windows.exe") -Force
+
+      - name: Upload runtime synthétique
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-runtime
+          if-no-files-found: error
+          retention-days: 7
+          path: synthetic-runtime/
+
+      - name: Upload msi-stage (diagnostic closure)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: msi-stage
+          if-no-files-found: warn
+          retention-days: 7
+          path: packaging/windows/stage/
+
+      - name: Upload MSI Windows x86_64
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-msi
+          if-no-files-found: error
+          retention-days: 14
+          path: packaging/windows/*.msi
+
+  verify-gui:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download runtime synthétique
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: synthetic-runtime
+          path: synthetic-runtime
+      - name: Smoke GUI synthétique et IPC isolé
+        run: ./.github/scripts/windows-synthetic-gui.ps1 -Exe synthetic-runtime/meeting-recorder-windows.exe
+      - name: Upload résultats synthétiques (fenêtre de test uniquement)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-audio-results
+          if-no-files-found: warn
+          retention-days: 7
+          path: synthetic-audio-results/
+
+  verify-msi:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # Le diagnostic des DLL installées doit aussi disposer d'objdump après
+      # déplacement sur la machine jetable, sans dépendre du PATH du PC.
+      - name: Outil de vérification des imports MSI
+        id: msi-tools
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-binutils
+      - name: Download MSI construit
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-msi
+          path: packaging/windows
+      # Installation sur une machine jetable, jamais sur le PC du propriétaire.
+      # MSI per-user silencieux puis lancement de
       # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
+        env:
+          UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
           $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
           if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
@@ -315,7 +470,7 @@ jobs:
           try {
             $diagObjdump = Join-Path $env:UCRT_BIN "objdump.exe"
             if (-not (Test-Path -LiteralPath $diagObjdump)) {
-              Write-Warning "[diag] objdump introuvable ($diagObjdump), diagnostic ignoré"
+              throw "objdump introuvable ($diagObjdump) : contrôle des imports impossible"
             } else {
               $diagDir = Split-Path $exe -Parent
               $diagSys32 = Join-Path $env:SystemRoot "System32"
@@ -337,7 +492,9 @@ jobs:
                 "d3d12.dll", "wldap32.dll", "bcryptprimitives.dll"
               ) | ForEach-Object { [void]$diagSys.Add($_) }
               $diagPresent = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
-              Get-ChildItem -LiteralPath $diagDir -Include "*.exe", "*.dll" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { [void]$diagPresent.Add($_.Name) }
+              Get-ChildItem -LiteralPath $diagDir -Recurse -File |
+                Where-Object { $_.Extension -in '.exe', '.dll' } |
+                ForEach-Object { [void]$diagPresent.Add($_.Name) }
               $diagSeen = @{}
               $diagQueue = New-Object System.Collections.Generic.Queue[string]
               $diagQueue.Enqueue($exe)
@@ -345,6 +502,7 @@ jobs:
               while ($diagQueue.Count -gt 0) {
                 $diagFile = $diagQueue.Dequeue()
                 $diagOut = & $diagObjdump -p $diagFile 2>$null
+                if ($LASTEXITCODE -ne 0) { throw "objdump -p en échec sur $diagFile" }
                 foreach ($diagLine in $diagOut) {
                   if ($diagLine -match "DLL Name:\s*(\S+)") {
                     $diagDep = $Matches[1]
@@ -365,7 +523,7 @@ jobs:
               }
             }
           } catch {
-            Write-Warning "[diag] diagnostic imports impossible : $($_.Exception.Message)"
+            throw "diagnostic imports impossible : $($_.Exception.Message)"
           }
           if ($diagMissing.Count -gt 0) {
             $diagMissing | ForEach-Object { Write-Output "[diag] import manquant : $_" }
@@ -387,42 +545,3 @@ jobs:
           $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
           $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }
-
-      # Smoke GUI démarrage (NON BLOQUANT, continue-on-error) : détecte un
-      # crash immédiat au lancement de l'exe. Limite assumée : le runner CI
-      # n'a pas de display garanti et aucun headless GTK (broadway/xvfb)
-      # n'existe sur UCRT64, donc ce step reste informatif et ne gate jamais.
-      - name: Smoke GUI démarrage (informatif, non bloquant)
-        continue-on-error: true
-        run: |
-          $exe = "target/release/meeting-recorder-windows.exe"
-          if (-not (Test-Path -LiteralPath $exe)) { throw "exe introuvable : $exe" }
-          $env:GDK_BACKEND = "win32"
-          $p = Start-Process $exe -NoNewWindow -PassThru
-          try {
-            if ($p.WaitForExit(15000)) {
-              if ($p.ExitCode -ne 0) { throw "l'exe a quitté en 15 s avec le code $($p.ExitCode) (crash au démarrage ?)" }
-              Write-Output "[ci] GUI smoke : sortie immédiate code 0"
-            } else {
-              Write-Output "[ci] GUI smoke : toujours vivant après 15 s (pas de crash au démarrage)"
-            }
-          } finally {
-            try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force } } catch {}
-          }
-
-      - name: Upload msi-stage (diagnostic closure)
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: msi-stage
-          if-no-files-found: warn
-          retention-days: 7
-          path: packaging/windows/stage/
-
-      - name: Upload MSI Windows x86_64
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-msi
-          if-no-files-found: error
-          retention-days: 14
-          path: packaging/windows/*.msi

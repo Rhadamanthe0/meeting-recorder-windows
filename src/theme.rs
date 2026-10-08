@@ -12,6 +12,7 @@ use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "windows"))]
 use gtk::prelude::*;
 #[cfg(not(target_os = "windows"))]
 use gtk::{gio, glib};
@@ -72,9 +73,10 @@ fn load() -> Option<Theme> {
     theme.get("background").map(|_| theme)
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn parse_hex(value: &str) -> Option<Rgb> {
     let hex = value.strip_prefix('#')?;
-    if hex.len() != 6 {
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
@@ -154,8 +156,8 @@ fn css(theme: &Theme) -> String {
             --warning-bg-color: {yellow}; --warning-fg-color: {on_yellow}; --warning-color: {yellow};
         }}
         .speaker-0 {{ color: {blue}; }} .speaker-1 {{ color: {orange}; }}
-        .speaker-2 {{ color: {green}; }} .speaker-3 {{ color: {magenta}; }}
-        .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {yellow}; }}",
+        .speaker-2 {{ color: {speaker_green}; }} .speaker-3 {{ color: {magenta}; }}
+        .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {speaker_yellow}; }}",
         bg = hex(bg),
         fg = hex(fg),
         dark_bg = hex(dark_bg),
@@ -169,10 +171,12 @@ fn css(theme: &Theme) -> String {
         on_green = hex(on(green)),
         yellow = hex(yellow),
         on_yellow = hex(on(yellow)),
-        blue = hex(blue),
-        orange = hex(orange),
-        magenta = hex(get("magenta", "bright_magenta").unwrap_or(accent)),
-        cyan = hex(get("cyan", "bright_cyan").unwrap_or(accent)),
+        blue = hex(mix(fg, blue, 0.35)),
+        orange = hex(mix(fg, orange, 0.35)),
+        speaker_green = hex(mix(fg, green, 0.35)),
+        speaker_yellow = hex(mix(fg, yellow, 0.35)),
+        magenta = hex(mix(fg, get("magenta", "bright_magenta").unwrap_or(accent), 0.35)),
+        cyan = hex(mix(fg, get("cyan", "bright_cyan").unwrap_or(accent), 0.35)),
     )
 }
 
@@ -204,7 +208,6 @@ pub fn follow(changed: impl Fn() + 'static) {
     #[cfg(target_os = "windows")]
     {
         let _ = changed;
-        return;
     }
 
     // A theme switch rewrites the files in the theme directory; debounce the burst.
@@ -243,6 +246,7 @@ mod tests {
     fn reads_hex_colours() {
         assert_eq!(parse_hex("#ff0000"), Some((1.0, 0.0, 0.0)));
         assert_eq!(parse_hex("ff0000"), None);
+        assert_eq!(parse_hex("#aéabc"), None);
         assert_eq!(hex((1.0, 0.5, 0.0)), "#ff8000");
     }
 

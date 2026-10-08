@@ -27,7 +27,7 @@ def main() -> None:
         parts = []
         for i, (who, text) in enumerate(turns):
             wav = Path(tmp) / f"{i}.wav"
-            subprocess.run(["piper-tts", "--model", str(voices / VOICES[who]), "--output_file", str(wav)],
+            subprocess.run([sys.executable, "-m", "piper", "--model", str(voices / VOICES[who]), "--output_file", str(wav)],
                            input=text.strip().encode(), check=True, capture_output=True)
             # Every voice at 22050 Hz mono, with a short pause after each turn.
             norm = Path(tmp) / f"{i}n.wav"
