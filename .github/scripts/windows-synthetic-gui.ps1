@@ -4,12 +4,22 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
-$version = & $Exe --version
-if ($LASTEXITCODE -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
-    throw "GUI refused: ci-audio binary required; hardware capture is forbidden"
-}
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 $Output = (Resolve-Path -LiteralPath $Output).Path
+# GUI-subsystem executables need an explicit wait and redirected output.
+$probe = Start-Process -FilePath $Exe -ArgumentList "--version" -PassThru -NoNewWindow `
+    -RedirectStandardOutput (Join-Path $Output "version.log") `
+    -RedirectStandardError (Join-Path $Output "version-stderr.log")
+try {
+    if (-not $probe.WaitForExit(10000)) {
+        Stop-Process -Id $probe.Id -Force
+        throw "Synthetic version check timed out; GUI launch refused"
+    }
+    $version = Get-Content -LiteralPath (Join-Path $Output "version.log")
+    if ($probe.ExitCode -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
+        throw "GUI refused: ci-audio binary required; hardware capture is forbidden"
+    }
+} finally { $probe.Dispose() }
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;

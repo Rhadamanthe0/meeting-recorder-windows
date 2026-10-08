@@ -499,6 +499,8 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn a_failed_manifest_removal_keeps_only_the_old_title() {
+        use std::os::windows::fs::OpenOptionsExt;
+
         let dir =
             std::env::temp_dir().join(format!("verify-manifest-readonly-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -506,17 +508,21 @@ mod tests {
             super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
         manifest.title = "Alpha".into();
         let old = super::write(&dir, &manifest).unwrap();
-        let mut permissions = std::fs::metadata(&old).unwrap().permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&old, permissions).unwrap();
+        // Rust can delete read-only files on modern Windows. A live handle
+        // shared for reads/writes but not deletion forces a real sharing
+        // violation, independent of the filesystem's read-only behavior.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE, no DELETE.
+            .open(&old)
+            .unwrap();
         manifest.title = "Beta".into();
         let result = super::write(&dir, &manifest);
-        let mut permissions = std::fs::metadata(&old).unwrap().permissions();
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&old, permissions).unwrap();
+        drop(lock);
         assert!(result.is_err());
         assert!(old.is_file());
         assert!(!super::path_for(&dir, "Beta").exists());
+        assert_eq!(super::open(&dir).unwrap().1.title, "Alpha");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

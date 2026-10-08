@@ -110,14 +110,34 @@ La relecture du simulateur a ensuite corrigé la lecture simultanée des pistes
 ## Reprise CI sans périphériques réels
 
 Le runner `PC-PRO-CLEM-meeting-recorder` a été identifié dans le job Windows.
-Les runs 37769817474 et 37769825072 ont été annulés avant le lancement GUI,
+Les runs 37769817474 et 37769825072 (y compris ses nouvelles tentatives) ont été annulés avant le lancement GUI,
 car le workflow existant ouvrait le binaire normal sans arguments. La feature
 `ci-audio` produit maintenant deux entrées générées en mémoire et une sortie
 silencieuse, avec identifiants d’application, pipe et préférences isolés.
 L’installation du MSI est déplacée sur `windows-latest` pour préserver le PC.
 Voir [les contrôles et leurs limites](ci-audio-windows.md).
 
-Avant exécution native : 74 tests Rust Linux (normal et ci-audio), Clippy Linux,
+Contrôles locaux : 74 tests Rust Linux (normal et ci-audio), Clippy Linux,
 contrôle de types Windows isolé, garde des spawns exécutée sous PowerShell et
 36 blocs/scripts PowerShell analysés avec succès. Les résultats natifs et le
 rendu Windows restent à obtenir. Compteur inchangé : **0/2**.
+
+La CI a été relancée sur le commit `cb2d50e` dans le run
+https://github.com/Rhadamanthe0/meeting-recorder-windows/actions/runs/37773593050.
+Le premier run sécurisé avait réussi les gardes, le formatage et les 18 tests
+Python avant son remplacement. La relecture ultérieure rétablit le diagnostic
+des DLL installées sur la machine jetable avec un outil explicitement fourni
+et un échec bloquant si le contrôle est impossible ; elle rend aussi explicite
+l’attente et la capture de sortie des sondes de version du binaire GUI.
+La syntaxe PowerShell/YAML de ces corrections a été vérifiée localement ;
+leur exécution native reste à obtenir.
+
+Le run `37773593050` a ensuite réussi `cargo check --locked` sur l'application
+Windows complète et exécuté 80 tests : **79 réussis, 1 en échec**. Le test
+de rollback supposait que l'attribut lecture seule empêcherait la suppression,
+ce qui n'est pas le cas sur ce runner. Il utilise maintenant un handle
+Windows qui refuse le partage pour suppression et vérifie aussi le titre
+effectivement rouvert. Le test et les assertions de rollback sont conservés.
+Les tests natifs de confinement des descendants, du pipe privé et du renommage
+limité à la casse ont réussi. Build release, MSI, audio synthétique et rendu
+GUI n'ont pas encore été exécutés. Compteur inchangé : **0/2**.

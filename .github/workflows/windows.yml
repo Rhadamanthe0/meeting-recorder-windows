@@ -48,6 +48,10 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Garder les compilations déjà réussies lorsqu'un test échoue ;
+          # les validations restent toutes réexécutées au run suivant.
+          cache-on-failure: true
 
       - name: Install GTK4 (MSYS2 UCRT64)
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
@@ -303,10 +307,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Tests ci-audio en échec" }
           cargo build --release --locked --features ci-audio
           if ($LASTEXITCODE -ne 0) { throw "Build ci-audio en échec" }
-          $version = & target/release/meeting-recorder-windows.exe --version
-          if ($LASTEXITCODE -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
-            throw "Binaire synthétique requis : lancement GUI refusé"
-          }
+          $versionLog = Join-Path $env:RUNNER_TEMP "meeting-recorder-synthetic-version.log"
+          $probe = Start-Process -FilePath target/release/meeting-recorder-windows.exe -ArgumentList "--version" -PassThru -NoNewWindow -RedirectStandardOutput $versionLog
+          try {
+            if (-not $probe.WaitForExit(10000)) {
+              Stop-Process -Id $probe.Id -Force
+              throw "Vérification de version expirée : lancement GUI refusé"
+            }
+            $version = Get-Content -LiteralPath $versionLog
+            if ($probe.ExitCode -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
+              throw "Binaire synthétique requis : lancement GUI refusé"
+            }
+          } finally { $probe.Dispose() }
 
       # A failed rendering check is reported. An interactive session is needed
       # on a self-hosted PC; the process always uses generated inputs.
@@ -351,6 +363,14 @@ jobs:
       run:
         shell: pwsh
     steps:
+      # Le diagnostic des DLL installées doit aussi disposer d'objdump après
+      # déplacement sur la machine jetable, sans dépendre du PATH du PC.
+      - name: Outil de vérification des imports MSI
+        id: msi-tools
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-binutils
       - name: Download MSI construit
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -361,6 +381,8 @@ jobs:
       # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
+        env:
+          UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
           $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
           if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
@@ -379,7 +401,7 @@ jobs:
           try {
             $diagObjdump = Join-Path $env:UCRT_BIN "objdump.exe"
             if (-not (Test-Path -LiteralPath $diagObjdump)) {
-              Write-Warning "[diag] objdump introuvable ($diagObjdump), diagnostic ignoré"
+              throw "objdump introuvable ($diagObjdump) : contrôle des imports impossible"
             } else {
               $diagDir = Split-Path $exe -Parent
               $diagSys32 = Join-Path $env:SystemRoot "System32"
@@ -401,7 +423,9 @@ jobs:
                 "d3d12.dll", "wldap32.dll", "bcryptprimitives.dll"
               ) | ForEach-Object { [void]$diagSys.Add($_) }
               $diagPresent = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
-              Get-ChildItem -LiteralPath $diagDir -Include "*.exe", "*.dll" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { [void]$diagPresent.Add($_.Name) }
+              Get-ChildItem -LiteralPath $diagDir -Recurse -File |
+                Where-Object { $_.Extension -in '.exe', '.dll' } |
+                ForEach-Object { [void]$diagPresent.Add($_.Name) }
               $diagSeen = @{}
               $diagQueue = New-Object System.Collections.Generic.Queue[string]
               $diagQueue.Enqueue($exe)
@@ -409,6 +433,7 @@ jobs:
               while ($diagQueue.Count -gt 0) {
                 $diagFile = $diagQueue.Dequeue()
                 $diagOut = & $diagObjdump -p $diagFile 2>$null
+                if ($LASTEXITCODE -ne 0) { throw "objdump -p en échec sur $diagFile" }
                 foreach ($diagLine in $diagOut) {
                   if ($diagLine -match "DLL Name:\s*(\S+)") {
                     $diagDep = $Matches[1]
@@ -429,7 +454,7 @@ jobs:
               }
             }
           } catch {
-            Write-Warning "[diag] diagnostic imports impossible : $($_.Exception.Message)"
+            throw "diagnostic imports impossible : $($_.Exception.Message)"
           }
           if ($diagMissing.Count -gt 0) {
             $diagMissing | ForEach-Object { Write-Output "[diag] import manquant : $_" }
