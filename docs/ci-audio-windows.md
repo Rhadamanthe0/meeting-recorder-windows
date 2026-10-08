@@ -3,6 +3,10 @@
 Le workflow `windows` utilise le runner `[self-hosted, windows, x64,
 meeting-recorder]`. Les PR de forks restent sur `windows-latest`.
 
+Si le runner personnel est indisponible, le lancement manuel du workflow
+avec `hosted=true` utilise une VM Windows GitHub pour le build et les mêmes
+contrôles. Ce choix est séparé de l'exécution locale dans la concurrence CI.
+
 Les tests ordinaires n'ouvrent pas de périphérique audio. Le MSI produit est
 le binaire normal. Son installation et sa désinstallation sont vérifiées dans
 le job `verify-msi`, sur une machine GitHub jetable, pour ne pas remplacer une

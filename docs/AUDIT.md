@@ -244,3 +244,10 @@ MSI ne les empêche plus de tourner ; seule la compilation release synthétique
 reste après la fabrication du MSI normal. Le contrôle PE reste bloquant mais
 n'affiche que le subsystem pertinent : son dump complet avait produit plus
 de 40 Mo de logs. Nouvelle validation native nécessaire. Compteur **0/2**.
+
+Le run `37798798983` (`4553ef8`) reste bloqué dans « Set up job » sur
+`PC-PRO-CLEM-meeting-recorder`, avant toute commande du dépôt ; aucun journal
+n'est disponible à ce stade. Une option de dispatch `hosted=true` permet
+maintenant d'exécuter exactement le même build sur une VM Windows GitHub,
+dans un groupe de concurrence distinct. Elle ne change pas le runner des
+push/PR internes habituels et ne modifie pas la configuration du PC.
