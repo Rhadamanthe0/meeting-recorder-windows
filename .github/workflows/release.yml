@@ -286,17 +286,27 @@ jobs:
             Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
             throw "msiexec /i exit $($install.ExitCode)"
           }
-          # Localisation robuste (runner SYSTEM) : $env:LOCALAPPDATA pointe vers le
-          # profil SYSTEM alors que l'install per-user peut atterrir sous un
-          # autre profil ; on ratisse LOCALAPPDATA + C:\Users\* + profil SYSTEM,
-          # fail-closed si zero ou plusieurs candidats.
-          $exeSearch = @((Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"), (Join-Path (Join-Path $env:SystemRoot "System32\config\systemprofile\AppData\Local") "Programs\MeetingRecorder\meeting-recorder-windows.exe"))
-          $exeSearch += @(Get-ChildItem -Path "C:\Users\*\AppData\Local\Programs\MeetingRecorder\meeting-recorder-windows.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-          $exeHits = @($exeSearch | Where-Object { $_ } | Sort-Object -Unique | Where-Object { Test-Path -LiteralPath $_ })
-          if ($exeHits.Count -eq 0) { throw "exe installe introuvable (cherche sous `$env:LOCALAPPDATA, C:\Users\*, profil SYSTEM)" }
-          if ($exeHits.Count -gt 1) { throw "plusieurs exe installes candidats : $($exeHits -join ', ') (refus ambigu)" }
-          $exe = $exeHits[0]
-          Write-Output "[ci] exe installe=$exe"
+          # Localisation robuste (runner SYSTEM) : le journal msiexec dit ou
+          # l'install per-user a atterri (INSTALLFOLDER) ; repli : ratissage
+          # LOCALAPPDATA + C:\Users\* + profil SYSTEM. Fail-closed si zero ou
+          # plusieurs candidats ; en echec, le journal est affiche (diagnostic).
+          Write-Output "[ci] whoami=$(whoami) LOCALAPPDATA=$env:LOCALAPPDATA"
+          $exe = $null
+          $logFolder = @(Select-String -Path $log -Pattern 'INSTALLFOLDER.*?([A-Z]:\\[^\"]+)' -ErrorAction SilentlyContinue | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim().Trim([char]39, [char]34).TrimEnd([char]46, [char]32, [char]39, [char]34) } | Where-Object { $_ } | Select-Object -Last 1)
+          if ($logFolder -and (Test-Path -LiteralPath (Join-Path $logFolder "meeting-recorder-windows.exe"))) { $exe = Join-Path $logFolder "meeting-recorder-windows.exe"; Write-Output "[ci] exe installe (journal msiexec)=$exe" }
+          if (-not $exe) {
+            $exeSearch = @((Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"), (Join-Path (Join-Path $env:SystemRoot "System32\config\systemprofile\AppData\Local") "Programs\MeetingRecorder\meeting-recorder-windows.exe"))
+            $exeSearch += @(Get-ChildItem -Path "C:\Users\*\AppData\Local\Programs\MeetingRecorder\meeting-recorder-windows.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+            $exeHits = @($exeSearch | Where-Object { $_ } | Sort-Object -Unique | Where-Object { Test-Path -LiteralPath $_ })
+            if ($exeHits.Count -gt 1) { throw "plusieurs exe installes candidats : $($exeHits -join ', ') (refus ambigu)" }
+            if ($exeHits.Count -eq 0) {
+              Get-Content $log -Tail 30 -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[msi] $_" }
+              Select-String -Path $log -Pattern "INSTALLFOLDER|MeetingRecorder" -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Output "[msi] $($_.LineNumber): $($_.Line)" }
+              throw "exe installe introuvable (journal + `$env:LOCALAPPDATA, C:\Users\*, profil SYSTEM)"
+            }
+            $exe = $exeHits[0]
+            Write-Output "[ci] exe installe (ratissage profils)=$exe"
+          }
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
           $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
           if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
