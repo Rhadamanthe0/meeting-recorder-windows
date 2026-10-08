@@ -57,11 +57,11 @@ try {
     if ($width -le 100 -or $height -le 100) { throw "Test window has invalid bounds" }
     $bitmap = [System.Drawing.Bitmap]::new($width, $height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $hdc = $graphics.GetHdc()
     try {
-        if (-not [SyntheticWindow]::PrintWindow($process.MainWindowHandle, $hdc, 2)) { throw "Window-only rendering capture failed" }
-    } finally { $graphics.ReleaseHdc($hdc) }
-    try {
+        $hdc = $graphics.GetHdc()
+        try {
+            if (-not [SyntheticWindow]::PrintWindow($process.MainWindowHandle, $hdc, 2)) { throw "Window-only rendering capture failed" }
+        } finally { $graphics.ReleaseHdc($hdc) }
         $colors = [System.Collections.Generic.HashSet[int]]::new()
         for ($y = 0; $y -lt $height; $y += 10) {
             for ($x = 0; $x -lt $width; $x += 10) { [void]$colors.Add($bitmap.GetPixel($x, $y).ToArgb()) }

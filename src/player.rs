@@ -191,30 +191,32 @@ impl Playback {
             return None;
         }
         if cfg!(feature = "ci-audio") {
-            let (sink, mut output) = Sink::new_idle();
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let mut sinks = Vec::with_capacity(sources.len());
             for source in sources {
+                let (sink, mut output) = Sink::new_idle();
                 match source {
                     TrackSource::Ffmpeg(source) => sink.append(source),
                     TrackSource::File(source) => sink.append(source),
                 }
-            }
-            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let active = running.clone();
-            std::thread::spawn(move || {
-                while active.load(std::sync::atomic::Ordering::Relaxed) {
-                    let count = output.sample_rate() as usize * output.channels() as usize / 50;
-                    for _ in 0..count {
-                        if output.next().is_none() {
-                            return;
+                let active = running.clone();
+                std::thread::spawn(move || {
+                    while active.load(std::sync::atomic::Ordering::Relaxed) {
+                        let count = output.sample_rate() as usize * output.channels() as usize / 50;
+                        for _ in 0..count {
+                            if output.next().is_none() {
+                                return;
+                            }
                         }
+                        std::thread::sleep(Duration::from_millis(20));
                     }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            });
+                });
+                sinks.push(sink);
+            }
             return Some(Playback {
                 _stream: None,
                 silent_output: Some(running),
-                sinks: vec![sink],
+                sinks,
                 started: Instant::now(),
                 from_us,
             });
@@ -1080,12 +1082,13 @@ mod windows_tests {
         )
         .unwrap();
         assert!(result.success());
-        let sources = prepare_sources(std::slice::from_ref(&path), 0);
+        let sources = prepare_sources(&[path.clone(), path], 0);
         let mut playback = Playback::assemble(sources, 0).expect("synthetic output opens");
         assert!(
             playback._stream.is_none(),
             "a hardware output stream was opened"
         );
+        assert_eq!(playback.sinks.len(), 2, "tracks must play concurrently");
         let deadline = Instant::now() + Duration::from_secs(5);
         while !playback.ended() {
             assert!(

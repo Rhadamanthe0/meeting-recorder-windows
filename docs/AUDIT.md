@@ -95,12 +95,17 @@ GTK/MSYS2, FFmpeg et ONNX Runtime puis exécute formatage, tests Python,
 `cargo check --locked`, `cargo test --locked`, Clippy, build release et contrôle
 d’installation MSI. Une exécution sur Windows de cet état, accompagnée des
 parcours matériels et UI décrits plus haut, est nécessaire pour lever le blocage.
-Ce workflow n’a pas été lancé depuis cette session.
+Une exécution de ce workflow sur la branche de test est maintenant en cours.
 
 La phase locale précédente n’avait effectué aucun commit ni push. La reprise
-CI prépare une branche de test distincte basée sur `ci/runners-locaux`, avec
+CI a publié une branche de test distincte basée sur `ci/runners-locaux`, avec
 les corrections de l’audit et la simulation audio ; aucune release ni aucun
 déploiement n’est demandé.
+
+Branche : `audit/windows-synthetic-audio-20261008`. Premier run sécurisé :
+https://github.com/Rhadamanthe0/meeting-recorder-windows/actions/runs/37771939044.
+La relecture du simulateur a ensuite corrigé la lecture simultanée des pistes
+(une sortie silencieuse indépendante par piste, comme dans le lecteur normal).
 
 ## Reprise CI sans périphériques réels
 
