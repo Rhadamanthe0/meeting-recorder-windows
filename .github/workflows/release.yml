@@ -27,7 +27,8 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Tags + dispatch manuel : jamais de code de fork → PCs du propriétaire.
+    runs-on: [self-hosted, windows, x64, meeting-recorder]
     permissions:
       contents: read
     env:

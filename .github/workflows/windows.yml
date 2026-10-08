@@ -16,7 +16,8 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Push et PR internes → PCs du propriétaire ; PRs de forks (code arbitraire) → GitHub.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'windows-latest' || fromJSON('["self-hosted", "windows", "x64", "meeting-recorder"]') }}
     permissions:
       contents: read
     env:
