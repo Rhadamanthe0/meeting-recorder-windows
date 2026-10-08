@@ -38,6 +38,9 @@ par ligne exhaustive.
   puis libération ; validation des langues avant tout travail ; stockage
   CString partagé et libéré dans une copie du même whisper-rs 0.16.0.
   Provenance, licence et correctif documentés dans third-party/whisper-rs.
+- Démonstrations : invocation du module Piper dans les deux scripts de rendu
+  et chemins du binaire Cargo corrigés dans le guide. Génération réelle de
+  deux pistes WAV alignées et d’un MP3 mono vérifiée sans lecture audio.
 - Banc : invocation de Piper par son module Python officiel ; limites de
   parole corrigées par une règle RMS fixe (60 dB, pas de 10 ms, marge 100 ms)
   retirant seulement le silence de bord des clips. Audio, paroles, locuteurs,
@@ -77,6 +80,11 @@ par ligne exhaustive.
   La dernière modification CSS doit encore recevoir la même validation.
 - CLI et exemples : entrées invalides refusées avec un seul message utile,
   exemple Obsidian testé avec Unicode, guillemets et antislashs.
+
+La vérification CTC indépendante utilise onnx-community/wav2vec2-base-960h-ONNX,
+révision 729c1a6730fb549c20a1c73a3d3f96f11020225e, graphe de 377911891 octets,
+SHA-256 00b7cc69516c1ab63c429e63a2b543e4d42bb77441ec5b98ee935de175b00de1.
+Ce modèle est diagnostique et ne change ni les références ni l’application.
 
 Les résultats, captures et scripts de diagnostic sont conservés dans
 /tmp/meeting-audit-* et les logs du workflow Windows. Une exécution du banc

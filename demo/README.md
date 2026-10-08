@@ -13,7 +13,8 @@ Everything in `screenshots/` and `media/` was shot in a throwaway Omarchy VM wit
 ## 1. Prerequisites on the host
 
 - `omavm` with a `fresh` snapshot (see the `vm` skill): a disposable Omarchy VM with SSH, passwordless sudo and autologin.
-- `piper-tts` and these English voices from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices), in one directory (`.onnx` plus `.onnx.json` each):
+- `piper-tts` installed in the Python environment running the rendering scripts
+  (they invoke `python -m piper`), and these English voices from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices), in one directory (`.onnx` plus `.onnx.json` each):
   - `en_US-amy-medium` (Maya in the recording demo, Anna in the import demo)
   - `en_US-ryan-medium` (Tom)
   - `en_US-hfc_male-medium` (Rob) and `en_US-lessac-medium` (Lena) for the import demo
@@ -32,8 +33,8 @@ Everything in `screenshots/` and `media/` was shot in a throwaway Omarchy VM wit
 - A release build, and the animation preview for the per-theme animation shots:
 
   ```bash
-  mise exec -- cargo build --release
-  CARGO_TARGET_DIR=target/preview mise exec -- cargo build --release --example transcribe_animation
+  cargo build --release
+  CARGO_TARGET_DIR=target/preview cargo build --release --example transcribe_animation
   ```
 
 ## 2. The demo meetings
@@ -53,7 +54,7 @@ demo/render_import.py <voices-dir> "/tmp/Onboarding design review.mp3"
 The voices were chosen so that the speaker diarization tells all three apart on Automatic; with two similar piper voices it finds only two speakers. Check it before shooting:
 
 ```bash
-target/release/omarchy-meeting-recorder transcribe-file "/tmp/Onboarding design review.mp3" --language en
+target/release/meeting-recorder-windows transcribe-file "/tmp/Onboarding design review.mp3" --language en
 ```
 
 **The finished demo meeting** (Launch sync, with the speakers renamed Maya and Tom and six chapters) is kept in `media/demo-data/launch-sync-meeting.tgz`. To make it from scratch: record the demo in the VM (step 5), transcribe it, rename the speakers on the done page, and make the chapters on the host, since the VM has no agent logged in: pull the meeting folder, run the chapter prompt from `src/chapters.rs` through `omarchy-meeting-recorder ask "<prompt>" < lines.txt`, write the result into the `.meeting-recorder` file and the `## Chapters` list in `transcript.md`, and push it back.
@@ -74,7 +75,7 @@ omavm user 'echo "hl.monitor({ output = \"Virtual-1\", mode = \"3840x2160@60\", 
 ### Installing the app in the guest
 
 ```bash
-omavm push target/release/omarchy-meeting-recorder /usr/local/bin/omarchy-meeting-recorder
+omavm push target/release/meeting-recorder-windows /usr/local/bin/omarchy-meeting-recorder
 omavm push target/preview/release/examples/transcribe_animation /usr/local/bin/transcribe-animation-preview
 omavm ssh 'mkdir -p /tmp/stage; chmod 755 /usr/local/bin/omarchy-meeting-recorder /usr/local/bin/transcribe-animation-preview'
 for f in data/omarchy-meeting-recorder.xml data/omarchy-meeting-recorder.desktop \
