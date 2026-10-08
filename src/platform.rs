@@ -124,17 +124,10 @@ pub fn models_dir() -> PathBuf {
     data_dir().join(APP_NAME).join("models")
 }
 
-/// Dossier runtime (socket Unix sur Linux ; sur Windows l'IPC passe par un
-/// named pipe, ce dossier n'est qu'un repli pour fichiers temporaires).
+/// Dossier runtime du socket Unix ; Windows utilise un named pipe.
+#[cfg(not(target_os = "windows"))]
 pub fn runtime_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::temp_dir().join(APP_NAME)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        gtk::glib::user_runtime_dir()
-    }
+    gtk::glib::user_runtime_dir()
 }
 
 /// Ouvre une URI (page web, dossier `file://`, `obsidian://`, …) dans

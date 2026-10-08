@@ -40,7 +40,7 @@ jobs:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
           # Éteint le warning rustfmt non fatal vu en log CI.
-          # clippy : requis par le step informatif "Clippy" ci-dessous.
+          # clippy : requis par le contrôle d'analyse statique ci-dessous.
           components: rustfmt, clippy
 
       - name: Affiche la toolchain (hôte GNU attendu)
@@ -215,11 +215,8 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      # Clippy informatif (NON BLOQUANT, continue-on-error) : relève les
-      # warnings sans gater tant que le socle n'est pas clean ; gating futur
-      # envisagé une fois le bruit résorbé.
-      - name: Clippy (informatif, non bloquant)
-        continue-on-error: true
+      # Les diagnostics Windows sont corrigés : un échec doit bloquer la CI.
+      - name: Clippy (bloquant)
         run: cargo clippy --locked --all-targets -- -D warnings
 
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
@@ -263,21 +260,9 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # WiX v3 (candle/light/heat) pour le MSI per-user. Idempotent : choco
-      # seulement si candle est absent.
-      - name: Install WiX v3 (MSI)
-        run: |
-          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-            choco install wixtoolset -y --no-progress
-          }
-          $wixBin = $null
-          foreach ($dir in @("C:\Program Files (x86)\WiX Toolset v3.14\bin", "C:\Program Files (x86)\WiX Toolset v3.11\bin")) {
-            if (Test-Path -LiteralPath $dir) { $wixBin = $dir; break }
-          }
-          if (-not $wixBin) { throw "candle.exe introuvable après choco install wixtoolset" }
-          $wixBin >> $env:GITHUB_PATH
-          $env:PATH = "$wixBin;$env:PATH"
-          candle.exe -? | Select-Object -First 2
+      # WiX v3 portable, pinné et vérifié, sans installation globale sur le PC.
+      - name: Prépare WiX v3 portable (MSI)
+        run: ./.github/scripts/setup-wix.ps1
 
       # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
       # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.
@@ -305,6 +290,8 @@ jobs:
         run: |
           cargo test --locked --features ci-audio
           if ($LASTEXITCODE -ne 0) { throw "Tests ci-audio en échec" }
+          cargo clippy --locked --all-targets --features ci-audio -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "Clippy ci-audio en échec" }
           cargo build --release --locked --features ci-audio
           if ($LASTEXITCODE -ne 0) { throw "Build ci-audio en échec" }
           $versionLog = Join-Path $env:RUNNER_TEMP "meeting-recorder-synthetic-version.log"

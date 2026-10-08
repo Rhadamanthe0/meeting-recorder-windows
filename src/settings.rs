@@ -72,6 +72,7 @@ pub fn save_your_name(name: &str) {
 }
 
 /// Whether the app already asked to put its widget in the bar.
+#[cfg(not(target_os = "windows"))]
 pub fn bar_widget_offered() -> bool {
     load()["bar_widget_offered"].as_str() == Some("yes")
 }

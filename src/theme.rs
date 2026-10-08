@@ -12,6 +12,7 @@ use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "windows"))]
 use gtk::prelude::*;
 #[cfg(not(target_os = "windows"))]
 use gtk::{gio, glib};
@@ -72,6 +73,7 @@ fn load() -> Option<Theme> {
     theme.get("background").map(|_| theme)
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn parse_hex(value: &str) -> Option<Rgb> {
     let hex = value.strip_prefix('#')?;
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -204,7 +206,6 @@ pub fn follow(changed: impl Fn() + 'static) {
     #[cfg(target_os = "windows")]
     {
         let _ = changed;
-        return;
     }
 
     // A theme switch rewrites the files in the theme directory; debounce the burst.

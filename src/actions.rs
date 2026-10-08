@@ -175,10 +175,12 @@ fn run_with_timeout(
         .iter()
         .map(|f| dir.join(f))
         .find(|p| p.exists());
+    #[cfg(not(target_os = "windows"))]
     let mut shell = silent_command("sh");
     #[cfg(target_os = "windows")]
+    let mut shell = silent_command("cmd");
+    #[cfg(target_os = "windows")]
     {
-        shell = silent_command("cmd");
         shell.arg("/C").arg(&action.command);
     }
     #[cfg(not(target_os = "windows"))]
@@ -375,7 +377,7 @@ mod tests {
             }
             return;
         }
-        let child = silent_command(std::env::current_exe().unwrap())
+        let mut child = silent_command(std::env::current_exe().unwrap())
             .args([
                 "actions::tests::descendant_fixture",
                 "--exact",
@@ -385,6 +387,12 @@ mod tests {
             .spawn()
             .unwrap();
         std::fs::write("descendant.pid", child.id().to_string()).unwrap();
+        // Reap a child that finishes early. In the "exited" fixture the
+        // parent can still exit immediately, leaving its child alive:
+        // the action's Job Object must clean it up.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         if mode == "running" {
             std::thread::sleep(Duration::from_secs(30));
         }

@@ -122,8 +122,10 @@ pub enum Unavailable {
     /// No default agent picked (`omarchy default agent <name>`).
     Unset,
     /// Picked but not on PATH.
+    #[cfg(target_os = "linux")]
     Missing(String),
     /// Known, but this app will not send text to it; the sentence says why.
+    #[cfg(target_os = "linux")]
     Refused(String),
 }
 
@@ -142,7 +144,9 @@ impl std::fmt::Display for Unavailable {
                     "No default agent. Pick one with: omarchy default agent <name>"
                 )
             }
+            #[cfg(target_os = "linux")]
             Unavailable::Missing(id) => write!(f, "{id} is not installed"),
+            #[cfg(target_os = "linux")]
             Unavailable::Refused(reason) => f.write_str(reason),
         }
     }

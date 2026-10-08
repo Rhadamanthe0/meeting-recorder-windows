@@ -197,7 +197,7 @@ impl Playback {
                 let (sink, mut output) = Sink::new_idle();
                 match source {
                     TrackSource::Ffmpeg(source) => sink.append(source),
-                    TrackSource::File(source) => sink.append(source),
+                    TrackSource::File(source) => sink.append(*source),
                 }
                 let active = running.clone();
                 std::thread::spawn(move || {
@@ -229,7 +229,7 @@ impl Playback {
             };
             match source {
                 TrackSource::Ffmpeg(source) => sink.append(source),
-                TrackSource::File(source) => sink.append(source),
+                TrackSource::File(source) => sink.append(*source),
             }
             sinks.push(sink);
         }
@@ -280,7 +280,7 @@ impl Drop for Playback {
 #[cfg(target_os = "windows")]
 enum TrackSource {
     Ffmpeg(FfmpegPcm),
-    File(rodio::source::SkipDuration<Decoder<BufReader<File>>>),
+    File(Box<rodio::source::SkipDuration<Decoder<BufReader<File>>>>),
 }
 
 /// Builds every playable track's source: the blocking half of starting
@@ -305,9 +305,9 @@ fn prepare_sources(files: &[PathBuf], from_us: i64) -> Vec<TrackSource> {
             let Ok(decoder) = Decoder::new(BufReader::new(opened)) else {
                 continue;
             };
-            sources.push(TrackSource::File(
+            sources.push(TrackSource::File(Box::new(
                 decoder.skip_duration(Duration::from_micros(from_us.max(0) as u64)),
-            ));
+            )));
         }
     }
     sources
@@ -1082,7 +1082,11 @@ mod windows_tests {
         )
         .unwrap();
         assert!(result.success());
-        let sources = prepare_sources(&[path.clone(), path], 0);
+        let mut sources = prepare_sources(std::slice::from_ref(&path), 0);
+        let fallback = Decoder::new(BufReader::new(File::open(&path).unwrap())).unwrap();
+        sources.push(TrackSource::File(Box::new(
+            fallback.skip_duration(Duration::ZERO),
+        )));
         let mut playback = Playback::assemble(sources, 0).expect("synthetic output opens");
         assert!(
             playback._stream.is_none(),

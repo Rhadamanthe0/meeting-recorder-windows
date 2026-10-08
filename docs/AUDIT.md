@@ -141,3 +141,28 @@ effectivement rouvert. Le test et les assertions de rollback sont conservés.
 Les tests natifs de confinement des descendants, du pipe privé et du renommage
 limité à la casse ont réussi. Build release, MSI, audio synthétique et rendu
 GUI n'ont pas encore été exécutés. Compteur inchangé : **0/2**.
+
+Le run `37776726518` (commit `fb174b8`) confirme désormais les **80 tests
+Windows réussis**, le check complet et le build release portable. La lecture
+des journaux révèle aussi des diagnostics Clippy Windows (étape encore
+informative) et l'absence de Chocolatey bloquant WiX. Les diagnostics sont
+corrigés sans désactivation de lint : code Unix limité à sa plateforme,
+attente du processus fixture dans un thread, variantes de lecteur proportionnées
+et formes Rust demandées par les contrôles existants. Les métadonnées
+de l'endpoint sont conservées dans les diagnostics audio existants. WiX
+3.14.1 est désormais fourni par une archive officielle portable vérifiée
+(taille 41 297 555, SHA-256 6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31),
+sans Chocolatey ni installation globale. Les tests audio synthétiques, leur
+Clippy, le rendu et le MSI restent à exécuter sur cet état corrigé.
+
+La relecture du convertisseur confirme également une perte du canal arrière
+droit en quadriphonie : l'indice 3 était toujours traité comme un LFE. Le
+convertisseur utilise désormais le masque réel WAVEFORMATEXTENSIBLE, garde
+les canaux arrière/latéraux/hauts sur leur côté et n'omet que le vrai LFE.
+Un test traverse le convertisseur avec quad, surround et 3.1 : il échoue sur
+l'ancienne implémentation et réussit sur la nouvelle. Les cinq tests purs
+de downmix/resampling extraits du code Windows ont été exécutés sur Linux
+avec succès ; le contrôle de types et Clippy Windows isolés réussissent.
+Le test de lecture synthétique couvre aussi le décodeur de repli Rodio, et
+Clippy devient bloquant dans le workflow normal et dans la variante ci-audio.
+La nouvelle validation native reste à exécuter. Compteur : **0/2**.
