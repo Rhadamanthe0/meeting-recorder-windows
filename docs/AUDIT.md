@@ -199,3 +199,17 @@ Le test existant est étendu aux six alias et à une extension : il échoue
 sur l'ancien code (`COM¹ -> COM¹`) puis réussit après correction, sans
 ouvrir aucun périphérique. Les 74 tests Linux, Clippy ci-audio et le
 formatage réussissent sur cet état. Compteur **0/2**.
+
+Le run `37790627534` (`5c26bbd`) échoue encore avant les validations Rust :
+la signature UCRT64 est invalide, puis la base est verrouillée. La locale
+UTF-8 seule n'a donc pas levé le blocage. La lecture du code de l'action
+MSYS2 pinnée confirme également un `taskkill /F /FI MODULES eq msys-2.0.dll`
+global durant sa mise à jour, susceptible d'arrêter les terminaux du PC.
+La préparation utilise maintenant le miroir officiel principal et force
+UCRT64 dès son initialisation (MINGW64 était hérité dans le journal).
+La mise à jour complète et l'installation des mêmes paquets sont conservées
+dans un script séparé qui ferme seulement l'agent du keyring MSYS2 temporaire
+et attend la sortie des processus qu'il lance. Toutes les signatures et
+les codes d'erreur restent bloquants ; aucune clé ni vérification n'est supprimée.
+Le chemin d'installation exposé vient directement de l'action, sans deviner
+le dossier du runner. L'exécution native reste à obtenir. Compteur **0/2**.

@@ -103,18 +103,21 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install GTK4 (MSYS2 UCRT64)
+        id: msys2-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        env:
+          MSYSTEM: UCRT64
+          __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
         with:
           msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-clang
-            mingw-w64-ucrt-x86_64-make
-            mingw-w64-ucrt-x86_64-cmake
+          # Même mise à jour complète, sans taskkill global sur le PC.
+          update: false
+          cache: false
+
+      - name: Met à jour MSYS2 et installe GTK sans arrêt global de processus
+        env:
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+        run: ./.github/scripts/install-msys2-packages.ps1 -Root $env:MSYS2_ROOT
 
       # Pas de ffmpeg live au PATH en release : le collector télécharge toujours
       # le ZIP pinné vérifié (GyanD/codexffmpeg 9.0.2, SHA-256 + taille contrôlés,
@@ -123,11 +126,13 @@ jobs:
       # mutable non versionné, exécuté via -version).
 
       - name: Expose GTK au build GNU
+        env:
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
         run: |
           # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
           Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
           Get-ChildItem $env:RUNNER_TEMP -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[ci] tempdir: $($_.FullName)" }
-          $roots = @((Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
+          $roots = @($env:MSYS2_ROOT, (Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
           $p = $null
           try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
           foreach ($r in $roots) {
