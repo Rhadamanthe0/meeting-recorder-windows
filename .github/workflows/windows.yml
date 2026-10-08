@@ -100,7 +100,7 @@ jobs:
           foreach ($r in $roots) {
             Write-Output "[ci] test racine : $r -> $(Test-Path $r)"
             foreach ($sub in @("ucrt64\bin\pkgconf.exe", "msys64\ucrt64\bin\pkgconf.exe", "usr\bin\pkgconf.exe")) {
-              $cand = if ($r) { Join-Path $r $sub } else { $null }
+              $cand = $null; try { if ($r) { $cand = Join-Path $r $sub } } catch { $cand = $null }
               if (-not $p -and $cand -and (Test-Path $cand)) { $p = $cand }
             }
             if (Test-Path $r) { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { Write-Output "[ci] subdir de $r : $($_.Name)" } }
