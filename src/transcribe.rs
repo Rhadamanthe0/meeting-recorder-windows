@@ -1,11 +1,10 @@
 //! Transcription after the meeting, in-process with whisper.cpp (whisper-rs).
 //!
-//! Both tracks are mixed and transcribed in one pass, so there is one timeline
-//! and nothing to merge. The speaker of every phrase is then read off the two
-//! tracks, like whisper.cpp's `--diarize`: where the mic carries more energy it
-//! is "You", where the computer audio does it is "Remote". Echo of the other
-//! side in the mic (no headset) is always quieter than the original, so it does
-//! not turn into a line of its own.
+//! Each recorded track is transcribed separately, then the sentences are
+//! interleaved on the original timeline. Nemotron distinguishes voices on
+//! each side; level, overlap and repeated-text checks suppress computer audio
+//! leaking into the microphone. Imports use one transcription with speaker
+//! turns from the same diarization model.
 
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
@@ -44,8 +43,8 @@ pub enum Event {
     Progress(f64),
     /// A freshly transcribed line.
     Segment(String),
-    /// Always the last event. whisper-rs leaks the boxed callbacks that hold a
-    /// sender, so the channel never closes on its own; wait for this instead.
+    /// Always the last event: reporting ends explicitly before the caller
+    /// handles the final result.
     Finished,
 }
 
@@ -1077,6 +1076,94 @@ struct Word {
     segment: usize,
 }
 
+/// Owned for one synchronous `WhisperState::full` call. The dependency's safe
+/// callback setters leak their boxes; use its raw setters with this scoped
+/// owner instead. Callbacks only read it, including the worker-thread abort.
+struct WhisperCallbacks {
+    events: Events,
+    abort: Abort,
+    progress: (f64, f64),
+    map: Vec<(usize, Region)>,
+    speakers: Speakers,
+}
+
+impl WhisperCallbacks {
+    /// # Safety
+    /// This owner must stay at its current address until the synchronous full
+    /// call returns. Do not retain or reuse params after dropping the owner.
+    unsafe fn install(&self, params: &mut FullParams<'_, '_>) {
+        let data = self as *const Self as *mut std::ffi::c_void;
+        // SAFETY: the caller retains the owner for the entire call; all three
+        // trampolines use shared access and no callback mutates the owner.
+        unsafe {
+            params.set_progress_callback(Some(whisper_progress));
+            params.set_progress_callback_user_data(data);
+            params.set_new_segment_callback(Some(whisper_segment));
+            params.set_new_segment_callback_user_data(data);
+            params.set_abort_callback(Some(whisper_abort));
+            params.set_abort_callback_user_data(data);
+        }
+    }
+}
+
+unsafe extern "C" fn whisper_progress(
+    _: *mut whisper_rs::WhisperSysContext,
+    _: *mut whisper_rs::WhisperSysState,
+    pct: i32,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: install passes the live, immutably accessed callback owner.
+    let callbacks = unsafe { &*(data as *const WhisperCallbacks) };
+    let pct = f64::from(pct.clamp(0, 100)) / 100.0;
+    emit(
+        &callbacks.events,
+        Event::Progress(callbacks.progress.0 + (callbacks.progress.1 - callbacks.progress.0) * pct),
+    );
+}
+
+unsafe extern "C" fn whisper_abort(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: install passes the live owner; AtomicBool permits worker reads.
+    unsafe { &*(data as *const WhisperCallbacks) }
+        .abort
+        .load(Ordering::Relaxed)
+}
+
+unsafe extern "C" fn whisper_segment(
+    _: *mut whisper_rs::WhisperSysContext,
+    state: *mut whisper_rs::WhisperSysState,
+    added: i32,
+    data: *mut std::ffi::c_void,
+) {
+    use whisper_rs::whisper_rs_sys as sys;
+    // SAFETY: Whisper invokes this synchronously with its live state and the
+    // callback owner installed above. Segment indices come from that state.
+    let callbacks = unsafe { &*(data as *const WhisperCallbacks) };
+    let count = unsafe { sys::whisper_full_n_segments_from_state(state) };
+    for index in (count - added).max(0)..count {
+        let text = unsafe { sys::whisper_full_get_segment_text_from_state(state, index) };
+        if text.is_null() {
+            continue;
+        }
+        // SAFETY: a segment's text is a NUL-terminated string owned by state.
+        let Ok(text) = unsafe { std::ffi::CStr::from_ptr(text) }.to_str() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || is_noise_marker(text) {
+            continue;
+        }
+        let start = unsafe { sys::whisper_full_get_segment_t0_from_state(state, index) };
+        let end = unsafe { sys::whisper_full_get_segment_t1_from_state(state, index) };
+        let (start, _) = locate(&callbacks.map, start * 10);
+        let (end, _) = locate(&callbacks.map, end * 10);
+        let speaker = callbacks.speakers.speaker(start, end);
+        emit(
+            &callbacks.events,
+            Event::Segment(format!("{speaker}: {text}")),
+        );
+    }
+}
+
 fn run_whisper(
     context: &WhisperContext,
     glued: &Glued,
@@ -1102,41 +1189,18 @@ fn run_whisper(
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
 
-    let progress_events = events.clone();
-    params.set_progress_callback_safe(move |pct: i32| {
-        let pct = f64::from(pct.clamp(0, 100)) / 100.0;
-        emit(
-            &progress_events,
-            Event::Progress(progress.0 + (progress.1 - progress.0) * pct),
-        );
+    let callbacks = Box::new(WhisperCallbacks {
+        events: events.clone(),
+        abort: abort.clone(),
+        progress,
+        map: glued.map.clone(),
+        speakers: speakers.clone(),
     });
-
-    // Live lines for the animation, with the speaker already worked out.
-    let segment_events = events.clone();
-    let map = glued.map.clone();
-    let live_speakers = speakers.clone();
-    params.set_segment_callback_safe(move |data: whisper_rs::SegmentCallbackData| {
-        let text = data.text.trim();
-        if text.is_empty() || is_noise_marker(text) {
-            return;
-        }
-        let (start, _) = locate(&map, data.start_timestamp * 10);
-        let (end, _) = locate(&map, data.end_timestamp * 10);
-        let speaker = live_speakers.speaker(start, end);
-        emit(
-            &segment_events,
-            Event::Segment(format!("{speaker}: {text}")),
-        );
-    });
-
-    // Passed as a boxed trait object on purpose: whisper-rs 0.16 casts the user
-    // data back to `F`, which only matches what it stored when F is this Box.
-    let abort_flag = abort.clone();
-    let should_abort: Box<dyn FnMut() -> bool> =
-        Box::new(move || abort_flag.load(Ordering::Relaxed));
-    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(should_abort));
-
+    // SAFETY: the box has a stable address, full is synchronous, and params is
+    // consumed by it. The owner remains alive until every callback finishes.
+    unsafe { callbacks.install(&mut params) };
     let result = state.full(params, &glued.samples);
+    drop(callbacks);
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
     }
@@ -1595,6 +1659,41 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whisper_callbacks_release_their_data_and_keep_progress_and_abort_behavior() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<WhisperCallbacks>();
+        for cancelled in [false, true] {
+            for _ in 0..20 {
+                let (events, receiver) = async_channel::unbounded();
+                let abort = Arc::new(AtomicBool::new(cancelled));
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                let callbacks = Box::new(WhisperCallbacks {
+                    events: events.clone(),
+                    abort: abort.clone(),
+                    progress: (0.25, 0.75),
+                    map: Vec::new(),
+                    speakers: Speakers::Turns(Vec::new()),
+                });
+                // SAFETY: keep the stable owner alive for every invocation;
+                // progress/abort do not use the null context/state arguments.
+                unsafe {
+                    callbacks.install(&mut params);
+                    let data = &*callbacks as *const WhisperCallbacks as *mut std::ffi::c_void;
+                    whisper_progress(std::ptr::null_mut(), std::ptr::null_mut(), 50, data);
+                    assert_eq!(whisper_abort(data), cancelled);
+                }
+                assert!(matches!(receiver.try_recv().unwrap(), Event::Progress(p) if p == 0.5));
+                drop(params);
+                drop(callbacks);
+                assert_eq!(Arc::strong_count(&abort), 1);
+                drop(events);
+                // A leaked callback retains a sender even after params drops.
+                assert!(receiver.is_closed());
+            }
+        }
+    }
 
     #[test]
     fn interrupted_download_removes_its_partial_file() {

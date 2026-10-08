@@ -403,3 +403,22 @@ titre du transcript ; une collision du manifeste et un dossier non inscriptible
 provoquent tous deux la restauration attendue, sans perte du contenu.
 Images et script de parcours : `/tmp/meeting-audit-title-gui/`. Compteur 0/2
 après ces corrections ; nouvelle CI et deux relectures finales nécessaires.
+
+La première relecture finale a identifié une fuite réelle dans les setters
+de callbacks « safe » de whisper-rs 0.16 : les Box passées en pointeurs bruts
+n'ont pas de propriétaire qui les libère, et leurs captures restent vivantes
+après FullParams. Un programme isolé reproduit le défaut : le compteur fort
+du drapeau d'annulation reste à 2 après drop, au lieu de 1. Cela remet le
+compteur des audits sans problème à 0/2.
+
+La correction utilise les setters bruts existants de la même dépendance,
+avec un propriétaire Rust à adresse stable maintenu pendant l'appel full
+synchrone et détruit avant tout retour de succès, d'erreur ou d'annulation.
+Les callbacks accèdent à des données partagées immuables et au drapeau atomique.
+Aucune nouvelle dépendance : seule la feature raw-api de whisper-rs est activée.
+Un test répété vérifie le progrès, l'annulation, le retour du compteur fort à 1
+et la fermeture du canal après libération. Les **78 tests Linux**, le check
+all-targets, les Clippy normal/ci-audio et le build release réussissent.
+La description du module est aussi corrigée pour correspondre aux deux passes
+de transcription réelles. La CI et le banc audio doivent confirmer cet état
+avant de reprendre les deux audits consécutifs.
