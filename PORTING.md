@@ -10,7 +10,8 @@ diarisation Nemotron ONNX, résumé via LM Studio/Ollama OpenAI-compatible).
 - `src/platform.rs` : SEULE source de chemins (`config/data/state/cache/
   meetings/models/runtime_dir`) — XDG/glib sur Linux, `dirs` sur Windows.
 - `Cargo.toml` : package renommé, `vulkan` hors défaut, deps Windows
-  (`wasapi`, `cpal`, `rodio`, `dirs`, `interprocess`, `windows-sys`),
+  (`wasapi`, `rodio`, `dirs`, `interprocess`, `windows-sys` ; `cpal` est
+  une dépendance transitive de `rodio`),
   `libc` sous `cfg(unix)`, `[[bin]]` dédié. Deps déjà déclarées : rien à ajouter.
 - `src/audio/windows.rs` : capture WASAPI micro + loopback, s16le 48 kHz
   stéréo, chunks 20 ms, resampling linéaire simple, reconnexion après 1 s.
@@ -19,6 +20,9 @@ diarisation Nemotron ONNX, résumé via LM Studio/Ollama OpenAI-compatible).
 - `src/player.rs` : lecture `rodio` (un `Sink` par piste), `ffmpeg.exe -ss`
   préféré, repli décodeur intégré ; `ffmpeg.exe` via PATH + dossier exe
   (`src/export.rs`).
+- `src/action_process.rs` : Job Objects pour les actions et les outils audio
+  (lecture, import, export, décodage, sondes et formes d'onde), avec arrêt des
+  descendants à la fermeture du job, y compris lors d'un crash du processus.
 - `src/agent.rs` : LLM local OpenAI-compatible — LM Studio
   `http://localhost:1234/v1` puis Ollama `http://localhost:11434/v1`,
   config `llm_base_url` / `llm_model` (défaut `qwen3-4b-instruct`), sans outils.
@@ -37,9 +41,8 @@ et les messages d'aide gardent l'ancien nom. La doc suit le réel.
 ## Reste (hors V1)
 
 1. Icône tray Windows.
-2. Job Object pour les enfants `ffmpeg.exe` (orphelins possibles sur crash).
-3. Tests audio réels (matériel WASAPI) ; seuls les tests unitaires/logiques existent.
-4. Build GTK validé par CI (runs Success du 2026-09-27).
+2. Tests audio réels (matériel WASAPI) ; seuls les tests unitaires/logiques existent.
+3. Build GTK validé par CI (runs Success du 2026-09-27).
 
 ## Limites connues
 
@@ -50,9 +53,9 @@ et les messages d'aide gardent l'ancien nom. La doc suit le réel.
 ## Limites connues V1 (relecture, non corrigées)
 
 - A la fermeture du son, les pistes s'arrêtent avant le flux : l'ordre compte.
-- Un format audio inhabituel donne du silence au lieu d'une erreur visible.
 - Les modèles sont rangés sous Roaming, pas sous le dossier local attendu.
-- Les lettres accentuées des noms peuvent être remplacées à l'export.
-- La console Windows lance les outils sans reprendre tous les réglages.
-- En ligne de commande, un texte collé trop long est coupé sans prévenir.
-- Certains noms réservés Windows (CON, PRN, AUX) ne sont pas filtrés.
+
+Les formats WASAPI non pris en charge produisent un diagnostic dans l'interface.
+Les noms exportés conservent les accents ; les caractères interdits, de contrôle
+et les noms réservés Windows sont filtrés. Une commande `start` dépassant la
+limite IPC est refusée avec un message et un code de sortie non nul.

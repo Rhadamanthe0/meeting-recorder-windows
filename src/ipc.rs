@@ -26,13 +26,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(target_os = "linux")]
-use gtk::glib;
-
 use crate::APP_NAME;
 use crate::audio::{Source, to_meter};
 
-const MAX_LINE: usize = 4096;
+pub const MAX_LINE: usize = 4096;
 
 #[derive(Clone, Default)]
 pub struct Status {
@@ -77,7 +74,7 @@ pub fn busiest(statuses: &Statuses) -> Status {
 
 #[cfg(target_os = "linux")]
 fn socket_path() -> PathBuf {
-    glib::user_runtime_dir().join(format!("{APP_NAME}.sock"))
+    crate::platform::runtime_dir().join(format!("{APP_NAME}.sock"))
 }
 
 pub fn now() -> i64 {
@@ -174,14 +171,16 @@ pub fn serve(
     });
 }
 
-#[cfg(target_os = "linux")]
-fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Command>) {
+fn read_commands(stream: impl Read, commands: &async_channel::Sender<Command>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     loop {
         line.clear();
         match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
             Ok(0) | Err(_) => return,
+            // Never interpret a truncated title, or its remaining bytes, as
+            // commands. Close the connection at the first invalid frame.
+            Ok(_) if !line.ends_with('\n') => return,
             Ok(_) => {
                 if let Some(command) = parse_command(&line) {
                     let _ = commands.send_blocking(command);
@@ -275,7 +274,11 @@ pub fn watch() {
 
 /// Pipe name for the live-state server on Windows (see above).
 #[cfg(target_os = "windows")]
-const PIPE_NAME: &str = "meeting-recorder-windows";
+const PIPE_NAME: &str = if cfg!(feature = "ci-audio") {
+    "meeting-recorder-windows-ci-audio"
+} else {
+    "meeting-recorder-windows"
+};
 
 /// The local socket name `serve` listens on and `send`/`watch` connect to.
 #[cfg(target_os = "windows")]
@@ -284,6 +287,40 @@ fn pipe_name() -> interprocess::local_socket::Name<'static> {
     PIPE_NAME
         .to_ns_name::<GenericNamespaced>()
         .expect("pipe name is a valid local socket name")
+}
+
+/// The default Windows pipe DACL grants read access to Everyone. Status
+/// frames contain meeting titles, so restrict this pipe to its owner and
+/// LocalSystem, with no inherited permissions.
+#[cfg(target_os = "windows")]
+fn private_pipe_security()
+-> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    use interprocess::os::windows::security_descriptor::{
+        AsSecurityDescriptorExt, BorrowedSecurityDescriptor,
+    };
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)(A;;GA;;;SY)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: the string is NUL-terminated; the returned descriptor is
+    // valid until LocalFree. Clone its contents before freeing it.
+    unsafe {
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut raw,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = BorrowedSecurityDescriptor::from_ptr(raw).to_owned_sd();
+        LocalFree(raw);
+        result
+    }
 }
 
 /// Starts the pipe server. Called once, from the primary instance. Clients
@@ -298,8 +335,14 @@ pub fn serve(
 ) {
     use interprocess::TryClone;
     use interprocess::local_socket::{ListenerOptions, prelude::*};
+    use interprocess::os::windows::local_socket::ListenerOptionsExt;
 
-    let listener = match ListenerOptions::new().name(pipe_name()).create_sync() {
+    let listener = match private_pipe_security().and_then(|security| {
+        ListenerOptions::new()
+            .name(pipe_name())
+            .security_descriptor(security)
+            .create_sync()
+    }) {
         Ok(listener) => listener,
         Err(e) => {
             eprintln!("{APP_NAME}: could not listen on \\\\.\\pipe\\{PIPE_NAME}: {e}");
@@ -370,26 +413,6 @@ pub fn serve(
     });
 }
 
-#[cfg(target_os = "windows")]
-fn read_commands(
-    stream: interprocess::local_socket::Stream,
-    commands: &async_channel::Sender<Command>,
-) {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {
-                if let Some(command) = parse_command(&line) {
-                    let _ = commands.send_blocking(command);
-                }
-            }
-        }
-    }
-}
-
 /// `meeting-recorder-windows stop`: ask the running app to stop recording.
 #[cfg(target_os = "windows")]
 pub fn send(command: &str) -> bool {
@@ -439,6 +462,48 @@ pub fn watch() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn the_pipe_owner_can_read_status_and_send_commands() {
+        use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream, prelude::*};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        let name = format!("{PIPE_NAME}-test-{}", std::process::id())
+            .to_ns_name::<GenericNamespaced>()
+            .unwrap()
+            .into_owned();
+        let listener = ListenerOptions::new()
+            .name(name.clone())
+            .security_descriptor(private_pipe_security().unwrap())
+            .create_sync()
+            .unwrap();
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            stream.write_all(b"state\n").unwrap();
+            let mut command = [0; 5];
+            stream.read_exact(&mut command).unwrap();
+            assert_eq!(&command, b"stop\n");
+        });
+        let mut client = Stream::connect(name).unwrap();
+        let mut status = [0; 6];
+        client.read_exact(&mut status).unwrap();
+        assert_eq!(&status, b"state\n");
+        client.write_all(b"stop\n").unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn truncated_frames_cannot_start_or_inject_commands() {
+        let (tx, rx) = async_channel::unbounded();
+        let long = format!("start {}stop\n", "x".repeat(MAX_LINE - 6));
+        read_commands(long.as_bytes(), &tx);
+        assert!(rx.try_recv().is_err());
+        read_commands(b"stop".as_slice(), &tx);
+        assert!(rx.try_recv().is_err());
+        read_commands(b"start Weekly\npause\n".as_slice(), &tx);
+        assert_eq!(rx.try_recv().unwrap(), ("start", "Weekly".into()));
+        assert_eq!(rx.try_recv().unwrap(), ("pause", String::new()));
+    }
 
     fn status(state: &'static str, title: &str) -> SharedStatus {
         Arc::new(Mutex::new(Status {

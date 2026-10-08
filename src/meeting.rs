@@ -234,13 +234,34 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
 /// Writes the manifest into `dir`, replacing one with another name (after a rename).
 pub fn write(dir: &Path, manifest: &Manifest) -> std::io::Result<PathBuf> {
     let target = path_for(dir, &manifest.title);
-    let old = find(dir);
+    let old = find(dir).filter(|old| {
+        old != &target
+            // On Windows, a case-only title change still names the same file.
+            // Deleting the old spelling after replacement would delete it.
+            && !matches!(
+                (old.canonicalize(), target.canonicalize()),
+                (Ok(old), Ok(target)) if old == target
+            )
+    });
+    if old.is_some() && target.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "another meeting manifest already exists at the new title",
+        ));
+    }
     let text = serde_json::to_string_pretty(&manifest.to_json()).unwrap_or_default() + "\n";
     atomic_write(&target, text.as_bytes())?;
     if let Some(old) = old
-        && old != target
+        && let Err(error) = std::fs::remove_file(&old)
     {
-        let _ = std::fs::remove_file(old);
+        // Keep the previous manifest authoritative if its deletion fails.
+        // Otherwise reopening the folder could pick either title at random.
+        if let Err(rollback) = std::fs::remove_file(&target) {
+            return Err(std::io::Error::other(format!(
+                "could not replace the previous manifest: {error}; could not remove the new manifest: {rollback}"
+            )));
+        }
+        return Err(error);
     }
     Ok(target)
 }
@@ -276,11 +297,11 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         file.sync_data()?;
         Ok(())
     })();
+    drop(file);
     if write_result.is_err() {
         let _ = std::fs::remove_file(&tmp);
         return write_result;
     }
-    drop(file);
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -439,10 +460,7 @@ mod tests {
         first.title = "Alpha".into();
         let old = super::write(&dir, &first).unwrap();
         assert!(old.exists());
-        assert_eq!(
-            std::fs::read_to_string(&old).unwrap().contains("Alpha"),
-            true
-        );
+        assert!(std::fs::read_to_string(&old).unwrap().contains("Alpha"));
         let mut second = first.clone();
         second.title = "Beta".into();
         let new = super::write(&dir, &second).unwrap();
@@ -451,5 +469,54 @@ mod tests {
         assert!(!old.exists());
         assert!(std::fs::read_to_string(&new).unwrap().contains("Beta"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_case_only_title_change_keeps_the_manifest() {
+        let dir = std::env::temp_dir().join(format!("verify-manifest-case-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        manifest.title = "Alpha".into();
+        super::write(&dir, &manifest).unwrap();
+        manifest.title = "alpha".into();
+        let target = super::write(&dir, &manifest).unwrap();
+        assert!(target.is_file());
+        assert_eq!(
+            super::Manifest::from_json(
+                &serde_json::from_str(
+                    &std::fs::read_to_string(super::find(&dir).unwrap()).unwrap()
+                )
+                .unwrap()
+            )
+            .unwrap()
+            .title,
+            "alpha"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_manifest_removal_keeps_only_the_old_title() {
+        let dir =
+            std::env::temp_dir().join(format!("verify-manifest-readonly-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        manifest.title = "Alpha".into();
+        let old = super::write(&dir, &manifest).unwrap();
+        let mut permissions = std::fs::metadata(&old).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&old, permissions).unwrap();
+        manifest.title = "Beta".into();
+        let result = super::write(&dir, &manifest);
+        let mut permissions = std::fs::metadata(&old).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&old, permissions).unwrap();
+        assert!(result.is_err());
+        assert!(old.is_file());
+        assert!(!super::path_for(&dir, "Beta").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

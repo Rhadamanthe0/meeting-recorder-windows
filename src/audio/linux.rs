@@ -21,6 +21,8 @@ const FLOOR_DB: f64 = -60.0;
 struct Inner {
     levels: VecDeque<f32>,
     file: Option<BufWriter<File>>,
+    /// Identifies the recording for sync operations completed off the lock.
+    recording: u64,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
     /// First write/flush/sync failure step (`None` while writing fine):
@@ -36,6 +38,12 @@ fn note_write_error(inner: &mut Inner, context: &str, message: String) {
     }
 }
 
+fn note_sync_error(inner: &mut Inner, recording: u64, message: String) {
+    if inner.recording == recording && inner.file.is_some() {
+        note_write_error(inner, "sync", message);
+    }
+}
+
 #[derive(Clone)]
 pub struct Source {
     inner: Arc<Mutex<Inner>>,
@@ -47,6 +55,7 @@ impl Source {
         let inner = Arc::new(Mutex::new(Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
+            recording: 0,
             paused: false,
             write_error: None,
         }));
@@ -66,6 +75,7 @@ impl Source {
         let file = BufWriter::new(File::create(path)?);
         let mut inner = self.inner.lock().unwrap();
         inner.file = Some(file);
+        inner.recording = inner.recording.wrapping_add(1);
         inner.paused = false;
         inner.write_error = None;
         Ok(())
@@ -79,8 +89,10 @@ impl Source {
     /// any (kept from the capture thread). The flush/sync run OUTSIDE the
     /// lock so the meters never block on the disk.
     pub fn stop_recording(&self) -> std::io::Result<()> {
-        let write_error = self.inner.lock().unwrap().write_error.take();
-        let file = self.inner.lock().unwrap().file.take();
+        let (write_error, file) = {
+            let mut inner = self.inner.lock().unwrap();
+            (inner.write_error.take(), inner.file.take())
+        };
         let mut error = write_error;
         if let Some(mut file) = file {
             if let Err(e) = file.flush() {
@@ -91,7 +103,7 @@ impl Source {
             }
         }
         match error {
-            Some(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message)),
+            Some(message) => Err(std::io::Error::other(message)),
             None => Ok(()),
         }
     }
@@ -169,10 +181,10 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
                 note_write_error(&mut inner, "write", e.to_string());
                 continue;
             }
-            if chunks.is_multiple_of(50) {
-                if let Err(e) = file.flush() {
-                    note_write_error(&mut inner, "flush", e.to_string());
-                }
+            if chunks.is_multiple_of(50)
+                && let Err(e) = file.flush()
+            {
+                note_write_error(&mut inner, "flush", e.to_string());
             }
         }
         // Sync disque toutes les 30 s, HORS verrou via un clone du File.
@@ -184,11 +196,12 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
         } else {
             None
         };
+        let recording = inner.recording;
         drop(inner);
-        if let Some(file) = sync_clone {
-            if let Err(e) = file.sync_data() {
-                note_write_error(&mut shared.lock().unwrap(), "sync", e.to_string());
-            }
+        if let Some(file) = sync_clone
+            && let Err(e) = file.sync_data()
+        {
+            note_sync_error(&mut shared.lock().unwrap(), recording, e.to_string());
         }
     }
     let _ = child.kill();
@@ -201,4 +214,43 @@ pub fn to_meter(peak: f32) -> f64 {
         return 0.0;
     }
     (1.0 - 20.0 * f64::from(peak).log10() / FLOOR_DB).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_late_sync_failure_cannot_degrade_the_next_recording() {
+        let source = Source {
+            inner: Arc::new(Mutex::new(Inner {
+                levels: VecDeque::new(),
+                file: None,
+                recording: 0,
+                paused: false,
+                write_error: None,
+            })),
+        };
+        let path = std::env::temp_dir().join(format!("mr-sync-generation-{}", std::process::id()));
+        source.start_recording(&path).unwrap();
+        let old = source.inner.lock().unwrap().recording;
+        source.stop_recording().unwrap();
+        source.start_recording(&path).unwrap();
+        let current = source.inner.lock().unwrap().recording;
+        note_sync_error(&mut source.inner.lock().unwrap(), old, "old failure".into());
+        assert!(source.write_error().is_none());
+        note_sync_error(
+            &mut source.inner.lock().unwrap(),
+            current,
+            "current failure".into(),
+        );
+        assert!(
+            source
+                .stop_recording()
+                .unwrap_err()
+                .to_string()
+                .contains("current failure")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 }

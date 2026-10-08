@@ -76,10 +76,8 @@ fn source_track(meeting_dir: &std::path::Path) -> PathBuf {
 fn copy_imported_artefacts(src: &std::path::Path, out: &std::path::Path) -> bool {
     for name in ["transcript.md", "audio.ogg", "mic.ogg", "computer.ogg"] {
         let from = src.join(name);
-        if from.is_file() {
-            if std::fs::copy(&from, out.join(name)).is_err() {
-                return false;
-            }
+        if from.is_file() && std::fs::copy(&from, out.join(name)).is_err() {
+            return false;
         }
     }
     for name in ["mic.ogg", "computer.ogg", "source.ogg"] {
@@ -398,8 +396,7 @@ struct Recorder {
     system: Source,
     /// A capture init failure already toasted: warn once per outage, not
     /// every 500 ms. Reset when both sources capture fine again.
-    /// (Windows only: `Source::init_error` n'existe que là-bas.)
-    #[cfg(target_os = "windows")]
+    /// Initialization errors are also checked on Windows.
     capture_warned: Cell<bool>,
     shared: SharedStatus,
     hub: std::rc::Weak<Hub>,
@@ -725,8 +722,16 @@ impl Recorder {
             .margin_end(24)
             .build();
         // A fixed, narrow column on the left; the transcript takes the rest.
-        let left_column = adw::Clamp::builder()
+        // Let the actions scroll on shorter screens: their combined minimum
+        // height must not force the window beyond the available desktop.
+        let left_scroll = gtk::ScrolledWindow::builder()
             .child(&left)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .vexpand(true)
+            .build();
+        let left_column = adw::Clamp::builder()
+            .child(&left_scroll)
             .maximum_size(320)
             .tightening_threshold(320)
             .width_request(320)
@@ -864,7 +869,6 @@ impl Recorder {
             current_line: Cell::new(-1),
             mic,
             system,
-            #[cfg(target_os = "windows")]
             capture_warned: Cell::new(false),
             shared,
             hub: Rc::downgrade(hub),
@@ -1243,6 +1247,13 @@ impl Recorder {
         });
 
         let weak = Rc::downgrade(self);
+        self.window.connect_destroy(move |_| {
+            if let Some(r) = weak.upgrade() {
+                r.player.unload();
+            }
+        });
+
+        let weak = Rc::downgrade(self);
         glib::timeout_add_local(Duration::from_millis(33), move || match weak.upgrade() {
             Some(r) => {
                 if r.window.is_visible() {
@@ -1364,7 +1375,9 @@ impl Recorder {
     }
 
     fn toast(&self, message: &str) {
-        self.toasts.add_toast(adw::Toast::new(message));
+        let toast = adw::Toast::new(message);
+        toast.set_use_markup(false);
+        self.toasts.add_toast(toast);
     }
 
     /// New logical document: a transcription or chapters in flight for the
@@ -1521,7 +1534,6 @@ impl Recorder {
     }
 
     fn tick(&self) {
-        #[cfg(target_os = "windows")]
         self.warn_capture_once();
         #[cfg(target_os = "windows")]
         self.refresh_endpoint_tooltips();
@@ -1545,8 +1557,8 @@ impl Recorder {
     /// Warns once per outage when a capture source refuses to start (exotic
     /// mix format, missing device, …), instead of silently recording zeros.
     /// Runs on the UI thread from `tick` (500 ms): two mutex reads, no block.
-    #[cfg(target_os = "windows")]
     fn warn_capture_once(&self) {
+        #[cfg(target_os = "windows")]
         let failing = self
             .mic
             .init_error()
@@ -1561,6 +1573,16 @@ impl Recorder {
                     .write_error()
                     .map(|step| ("Microphone", step, true))
             })
+            .or_else(|| {
+                self.system
+                    .write_error()
+                    .map(|step| ("System audio", step, true))
+            });
+        #[cfg(not(target_os = "windows"))]
+        let failing = self
+            .mic
+            .write_error()
+            .map(|step| ("Microphone", step, true))
             .or_else(|| {
                 self.system
                     .write_error()
@@ -1734,6 +1756,11 @@ impl Recorder {
         language: &'static str,
         speakers: Option<usize>,
     ) {
+        // A dialog may have stayed open while an IPC command started a call.
+        if !matches!(self.state.get(), State::Idle | State::Done) {
+            self.toast("Finish the current recording first");
+            return;
+        }
         let title = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1813,7 +1840,7 @@ impl Recorder {
             };
             if conversion_failed {
                 // Never a partial Done: the folder goes, the page resets.
-                if std::fs::remove_dir_all(&out).is_err() {}
+                let _ = std::fs::remove_dir_all(&out);
                 *this.result_dir.borrow_mut() = None;
                 *this.manifest.borrow_mut() = None;
                 this.animation.set_running(false);
@@ -2038,6 +2065,9 @@ impl Recorder {
     }
 
     fn start(self: &Rc<Self>) {
+        if !matches!(self.state.get(), State::Idle | State::Done) {
+            return;
+        }
         // One recording at a time: the audio sources are shared by all windows.
         if let Some(other) = self.hub.upgrade().and_then(|hub| hub.recording())
             && !Rc::ptr_eq(&other, self)
@@ -2071,9 +2101,9 @@ impl Recorder {
             .and_then(|_| self.system.start_recording(&staging.join("system.raw")))
         {
             // Best-effort stop: the capture never really started.
-            if self.mic.stop_recording().is_err() {}
-            if self.system.stop_recording().is_err() {}
-            if std::fs::remove_dir_all(&staging).is_err() {}
+            let _ = self.mic.stop_recording();
+            let _ = self.system.stop_recording();
+            let _ = std::fs::remove_dir_all(&staging);
             self.status_label
                 .set_label(&format!("Could not start recording: {e}"));
             return;
@@ -2106,11 +2136,6 @@ impl Recorder {
         if self.state.get() != State::Recording {
             return;
         }
-        if self.paused.get() {
-            self.paused_secs
-                .set(self.paused_secs.get() + ipc::now() - self.pause_began.get());
-            self.paused.set(false);
-        }
         // Reserve the meeting folder before stopping: on failure the
         // recording stays intact and keeps going.
         if let Err(e) = std::fs::create_dir_all(platform::meetings_dir()) {
@@ -2129,6 +2154,11 @@ impl Recorder {
         let Some(staging) = self.staging.borrow().clone() else {
             return;
         };
+        if self.paused.get() {
+            self.paused_secs
+                .set(self.paused_secs.get() + ipc::now() - self.pause_began.get());
+            self.paused.set(false);
+        }
         self.freeze_meters(false);
         let capture_error = self.stop_live_capture();
         let format = self.selected_format();
@@ -2204,7 +2234,7 @@ impl Recorder {
             // go only when everything (audio, tracks, manifest, transcript)
             // is safely on disk.
             if report.ok() && result.is_ok() {
-                if std::fs::remove_dir_all(&staging).is_err() {}
+                let _ = std::fs::remove_dir_all(&staging);
             }
             let mut problems = report.problems().join(" ");
             if let Some(e) = capture_error {
@@ -2436,14 +2466,16 @@ impl Recorder {
         // Follow a name that was edited while the transcription ran.
         self.apply_title();
 
-        let problem = match (&transcript, audio_problem) {
-            (Err(message), _) if message == CANCELLED => {
-                Some("Transcription cancelled.".to_owned())
-            }
-            (Err(message), _) => Some(format!("Transcription failed: {message}.")),
-            (_, Some(audio)) => Some(audio),
+        let transcript_problem = match &transcript {
+            Err(message) if message == CANCELLED => Some("Transcription cancelled.".to_owned()),
+            Err(message) => Some(format!("Transcription failed: {message}.")),
             _ => None,
         };
+        let problems: Vec<_> = audio_problem
+            .into_iter()
+            .chain(transcript_problem)
+            .collect();
+        let problem = (!problems.is_empty()).then(|| problems.join(" "));
         let text = self
             .result_dir
             .borrow()
@@ -2542,7 +2574,7 @@ impl Recorder {
                 return;
             }
             if !copy_imported_artefacts(&dir, &out) {
-                if std::fs::remove_dir_all(&out).is_err() {}
+                let _ = std::fs::remove_dir_all(&out);
                 self.toast("Could not copy the meeting files; nothing was imported");
                 return;
             }
@@ -2552,10 +2584,11 @@ impl Recorder {
         // meetings folder: never write into an unowned parent. (After an
         // import-copy above, `find(&out)` sees the manifest just written, so
         // this is skipped naturally.)
-        if meeting::find(&dir).is_none() && is_owned_meeting_dir(&dir) {
-            if meeting::write(&dir, &manifest).is_err() {
-                self.toast("Could not save the meeting file");
-            }
+        if meeting::find(&dir).is_none()
+            && is_owned_meeting_dir(&dir)
+            && meeting::write(&dir, &manifest).is_err()
+        {
+            self.toast("Could not save the meeting file");
         }
 
         self.loading.set(true);
@@ -2826,6 +2859,7 @@ impl Recorder {
         // same minute share the folder prefix, but not `started_at`.
         let gen_started = self.started_at.get();
         let generation = self.meeting_gen.get();
+        let revision = self.transcript_rev.get();
         // `lines` belongs to the meeting it was rendered for; an import
         // meanwhile clears it, so a manual Generate must not run on stale lines.
         if self.lines_started.get() != gen_started {
@@ -2851,6 +2885,7 @@ impl Recorder {
             .await
             .unwrap_or_else(|_| Err("the agent stopped unexpectedly".into()));
             this.generating.set(false);
+            this.update_chapters_header(!this.chapter_starts.borrow().is_empty());
             // The folder may have been renamed meanwhile (same timestamp
             // prefix, same `started_at`); a different meeting — even one
             // started in the same minute — is left alone.
@@ -2858,6 +2893,8 @@ impl Recorder {
             let Some(dir) = current.filter(|d| {
                 Recorder::chapters_still_current(&dir, gen_started, d, this.started_at.get())
                     && this.meeting_gen.get() == generation
+                    && this.transcript_rev.get() == revision
+                    && this.state.get() == State::Done
             }) else {
                 return;
             };
@@ -3077,6 +3114,8 @@ impl Recorder {
         editor.grab_focus();
 
         let done = Rc::new(Cell::new(false));
+        let generation = self.meeting_gen.get();
+        let revision = self.transcript_rev.get();
         let finish = {
             let (weak, editor, label, row, button) = (
                 Rc::downgrade(self),
@@ -3116,6 +3155,12 @@ impl Recorder {
                     // Deferred: saving rebuilds the list this row lives in.
                     let (sources, time, who) = (sources.clone(), time.clone(), who.clone());
                     glib::idle_add_local_once(move || {
+                        if r.meeting_gen.get() != generation
+                            || r.transcript_rev.get() != revision
+                            || r.state.get() != State::Done
+                        {
+                            return;
+                        }
                         if text.is_empty() {
                             r.delete_paragraph(&sources);
                         } else {
@@ -3238,10 +3283,8 @@ impl Recorder {
             if !undo_applies(
                 captured_dir.as_deref(),
                 current_dir.as_deref(),
-                captured_gen,
-                r.meeting_gen.get(),
-                captured_rev,
-                r.transcript_rev.get(),
+                (captured_gen, captured_rev),
+                (r.meeting_gen.get(), r.transcript_rev.get()),
                 current_text.as_deref(),
                 &after,
             ) {
@@ -3444,31 +3487,31 @@ impl Recorder {
             }
         }
         let transcript = dir.join("transcript.md");
-        let mut saved = true;
-        match std::fs::read_to_string(&transcript) {
-            Ok(text) => {
-                if meeting::atomic_write(
-                    &transcript,
-                    meeting::relabel_all(&text, &renames).as_bytes(),
-                )
-                .is_err()
-                {
-                    saved = false;
-                }
-            }
-            Err(_) => saved = false,
-        }
-        let you_changed = manifest.imported.is_none() && names.first() != manifest.speakers.first();
-        if let Some(m) = self.manifest.borrow_mut().as_mut() {
-            m.speakers = names.clone();
-            if meeting::write(&dir, m).is_err() {
-                saved = false;
-            }
-        }
-        if !saved {
+        let Ok(text) = std::fs::read_to_string(&transcript) else {
+            self.toast("Could not read the transcript; speaker names were not saved");
+            return;
+        };
+        if meeting::atomic_write(
+            &transcript,
+            meeting::relabel_all(&text, &renames).as_bytes(),
+        )
+        .is_err()
+        {
             self.toast("Could not save the speaker names");
             return;
         }
+        let you_changed = manifest.imported.is_none() && names.first() != manifest.speakers.first();
+        let mut updated = manifest;
+        updated.speakers = names.clone();
+        if meeting::write(&dir, &updated).is_err() {
+            if meeting::atomic_write(&transcript, text.as_bytes()).is_err() {
+                self.toast("Speaker names could not be saved or restored; check the meeting files");
+            } else {
+                self.toast("Could not save the speaker names");
+            }
+            return;
+        }
+        *self.manifest.borrow_mut() = Some(updated);
         self.transcript_rev
             .set(self.transcript_rev.get().wrapping_add(1));
         if you_changed && let Some(you) = names.first() {
@@ -3491,6 +3534,14 @@ impl Recorder {
         let Some(current) = self.result_dir.borrow().clone() else {
             return;
         };
+        let Some(mut manifest) = self.manifest.borrow().clone() else {
+            self.toast("Could not read the meeting file; rename refused");
+            return;
+        };
+        let title = self.title();
+        if manifest.title == title {
+            return;
+        }
         // Fail closed: only a managed meeting folder may be renamed. Without
         // this, a result dir pointing outside Meetings (e.g. Downloads after
         // opening a standalone manifest) would get renamed as a whole.
@@ -3498,7 +3549,6 @@ impl Recorder {
             self.toast("This folder is not a managed meeting folder; rename refused");
             return;
         }
-        let title = self.title();
         let target = output_dir(self.started_at.get(), &title);
         // "202609241400 Weekly 2" is still the folder of "Weekly": an import
         // got a number when the name was taken. Only a new name renames.
@@ -3522,38 +3572,46 @@ impl Recorder {
         }
         // The folder the meeting is in now: renamed, or the numbered one it had.
         let target = if renamed { target } else { current };
-        let mut retitled = false;
-        let mut saved = true;
-        if let Some(manifest) = self.manifest.borrow_mut().as_mut()
-            && manifest.title != title
-        {
-            manifest.title = title.clone();
-            if meeting::write(&target, manifest).is_err() {
-                saved = false;
-            }
-            retitled = true;
-        }
-        if !renamed && !retitled {
-            return;
-        }
         let transcript = target.join("transcript.md");
-        if let Ok(text) = std::fs::read_to_string(&transcript)
+        let text = match std::fs::read_to_string(&transcript) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                self.toast("Could not read the transcript; title was not saved");
+                return;
+            }
+        };
+        let mut heading_changed = false;
+        if let Some(text) = text.as_deref()
             && let Some(rest) = text.strip_prefix("# ")
         {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
             if meeting::atomic_write(&transcript, format!("# {title}\n{body}").as_bytes()).is_err()
             {
-                saved = false;
-            } else {
-                self.transcript_rev
-                    .set(self.transcript_rev.get().wrapping_add(1));
+                self.toast("Could not save the title");
+                return;
             }
+            heading_changed = true;
         }
-        if saved {
-            self.toast("Saved");
-        } else {
-            self.toast("Could not save the title");
+        manifest.title = title;
+        if meeting::write(&target, &manifest).is_err() {
+            if heading_changed
+                && text.as_deref().is_some_and(|text| {
+                    meeting::atomic_write(&transcript, text.as_bytes()).is_err()
+                })
+            {
+                self.toast("Title could not be saved or restored; check the meeting files");
+            } else {
+                self.toast("Could not save the title");
+            }
+            return;
         }
+        *self.manifest.borrow_mut() = Some(manifest);
+        if heading_changed {
+            self.transcript_rev
+                .set(self.transcript_rev.get().wrapping_add(1));
+        }
+        self.toast("Saved");
     }
 
     fn close_when_done(&self) {
@@ -3577,7 +3635,9 @@ impl Recorder {
         dialog.connect_response(None, move |_, response| {
             if response == "stop" {
                 this.stop();
-                this.close_when_done();
+                if this.state.get() != State::Recording {
+                    this.close_when_done();
+                }
             }
         });
         dialog.present(Some(&self.window));
@@ -3690,16 +3750,13 @@ fn output_dir(started_at: i64, title: &str) -> PathBuf {
 fn undo_applies(
     captured_dir: Option<&std::path::Path>,
     current_dir: Option<&std::path::Path>,
-    captured_gen: u64,
-    current_gen: u64,
-    captured_rev: u64,
-    current_rev: u64,
+    captured_version: (u64, u64),
+    current_version: (u64, u64),
     current_text: Option<&str>,
     expected_after: &str,
 ) -> bool {
     captured_dir == current_dir
-        && captured_gen == current_gen
-        && captured_rev == current_rev
+        && captured_version == current_version
         && current_text == Some(expected_after)
 }
 
@@ -4015,14 +4072,15 @@ fn import_audio(
     std::fs::create_dir_all(staging).map_err(|e| e.to_string())?;
     let raw = staging.join("mic.raw");
     let silence = staging.join("system.raw");
-    let decoded = platform::silent_command(export::ffmpeg())
-        .args(["-v", "error", "-y", "-nostdin", "-i"])
-        .arg(source)
-        .args(["-vn", "-f", "s16le", "-ar", "48000", "-ac", "2"])
-        .arg(&raw)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let decoded = crate::action_process::status(
+        platform::silent_command(export::ffmpeg())
+            .args(["-v", "error", "-y", "-nostdin", "-i"])
+            .arg(source)
+            .args(["-vn", "-f", "s16le", "-ar", "48000", "-ac", "2"])
+            .arg(&raw),
+    )
+    .map(|s| s.success())
+    .unwrap_or(false);
     let bytes = std::fs::metadata(&raw).map(|m| m.len()).unwrap_or(0);
     if !decoded || bytes == 0 {
         let _ = std::fs::remove_dir_all(staging);
@@ -4030,16 +4088,17 @@ fn import_audio(
     }
     let _ = std::fs::write(&silence, []);
     let listened = export_audio(&raw, &silence, out, Format::Mono);
-    let kept = platform::silent_command(export::ffmpeg())
-        .args([
-            "-v", "error", "-y", "-nostdin", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i",
-        ])
-        .arg(&raw)
-        .args(["-ac", "1", "-c:a", "libopus", "-b:a", "48k"])
-        .arg(source_track(out))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let kept = crate::action_process::status(
+        platform::silent_command(export::ffmpeg())
+            .args([
+                "-v", "error", "-y", "-nostdin", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i",
+            ])
+            .arg(&raw)
+            .args(["-ac", "1", "-c:a", "libopus", "-b:a", "48k"])
+            .arg(source_track(out)),
+    )
+    .map(|s| s.success())
+    .unwrap_or(false);
     let _ = std::fs::remove_dir_all(staging);
     if !listened || !kept {
         return Err("could not convert the audio".into());
@@ -4135,17 +4194,14 @@ fn speakers_in(markdown: &str) -> Vec<String> {
 
 /// `01:23` or `1:02:03` to milliseconds.
 fn clock_to_ms(clock: &str) -> i64 {
-    clock
-        .split(':')
-        .filter_map(|part| part.parse::<i64>().ok())
-        .fold(0, |total, part| total * 60 + part)
-        * 1000
+    chapters::parse_clock(clock).unwrap_or(0)
 }
 
 /// Splits `**[01:23] You:** text` into its time, speaker and text.
 fn parse_segment(line: &str) -> Option<(&str, &str, &str)> {
     let rest = line.strip_prefix("**[")?;
     let (time, rest) = rest.split_once("] ")?;
+    chapters::parse_clock(time)?;
     let (speaker, text) = rest.split_once(":** ")?;
     Some((time, speaker, text.trim()))
 }
@@ -4171,7 +4227,8 @@ fn load_css() {
          .drop-hint { margin: 10px; border: 3px dashed @accent_color; border-radius: 14px;
                       background: alpha(@window_bg_color, 0.88); color: @accent_color; }
          .row-actions { opacity: 0; transition: opacity 120ms; }
-         .transcript row:hover .row-actions, .transcript row.editing .row-actions { opacity: 1; }
+         .transcript row:hover .row-actions, .transcript row:focus-within .row-actions,
+         .transcript row.editing .row-actions { opacity: 1; }
          .row-actions button { min-height: 24px; min-width: 24px; padding: 2px; }
          .transcript-editor { background: alpha(currentColor, 0.06); border-radius: 6px; padding: 4px 6px; }
          .transcript-editor text { background: transparent; }
@@ -4191,7 +4248,7 @@ pub fn safe_name(text: &str) -> String {
     let cleaned: String = text
         .chars()
         .map(|c| {
-            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
                 '-'
             } else {
                 c
@@ -4394,6 +4451,7 @@ mod tests {
         assert_eq!(safe_name("console"), "console");
         assert_eq!(safe_name("com10"), "com10");
         assert_eq!(safe_name("Meeting: notes"), "Meeting- notes");
+        assert_eq!(safe_name("Meeting\nnotes\u{1f}"), "Meeting-notes-");
         assert_eq!(safe_name("  "), "Meeting");
     }
 
@@ -4427,7 +4485,14 @@ mod tests {
         let dir_a = Path::new("/Meetings/202609241400 A");
         let dir_b = Path::new("/Meetings/202609241400 B");
         let applies = |dir: &Path, generation: u64, rev: u64, text: Option<&str>| {
-            undo_applies(Some(dir_a), Some(dir), 7, generation, 3, rev, text, "after")
+            undo_applies(
+                Some(dir_a),
+                Some(dir),
+                (7, 3),
+                (generation, rev),
+                text,
+                "after",
+            )
         };
         assert!(applies(dir_a, 7, 3, Some("after")));
         assert!(!applies(dir_b, 7, 3, Some("after")));

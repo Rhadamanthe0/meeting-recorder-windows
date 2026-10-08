@@ -10,6 +10,9 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 fn main() {
+    // CI requires a portable binary even when Cargo reuses a local/cache build.
+    // Watch this option also when it is initially absent from the environment.
+    println!("cargo:rerun-if-env-changed=GGML_NATIVE");
     let target = env::var("TARGET").unwrap();
     // Link C++ standard library
     if let Some(cpp_stdlib) = get_cpp_link_stdlib(&target) {
@@ -285,6 +288,7 @@ fn main() {
         let is_ggml_flag = key.starts_with("GGML_");
         let is_cmake_flag = key.starts_with("CMAKE_");
         if is_whisper_flag || is_ggml_flag || is_cmake_flag {
+            println!("cargo:rerun-if-env-changed={key}");
             config.define(&key, &value);
         }
     }

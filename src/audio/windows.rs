@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 //! Capture WASAPI : micro (`@DEFAULT_SOURCE@`) + loopback système
-//! (`@DEFAULT_MONITOR@`), via la crate `wasapi` 0.24 déclarée
+//! (`@DEFAULT_MONITOR@`), via la crate `wasapi` 0.25 déclarée
 //! (crate `windows` moderne, métadonnées embarquées, pas de winmd à fournir).
 //!
 //! Même contrat que `super::linux` : un thread par `Source`, chunks de
@@ -33,6 +33,8 @@ const FALLBACK_PERIOD_HNS: i64 = 200_000; // 20 ms
 struct Inner {
     levels: VecDeque<f32>,
     file: Option<BufWriter<File>>,
+    /// Identifies the recording for sync operations completed off the lock.
+    recording: u64,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
     /// Last init failure step (`None` while capturing fine): polled by the UI
@@ -53,6 +55,12 @@ struct Inner {
 fn note_write_error(inner: &mut Inner, context: &str, message: String) {
     if inner.write_error.is_none() {
         inner.write_error = Some(format!("{context}: {message}"));
+    }
+}
+
+fn note_sync_error(inner: &mut Inner, recording: u64, message: String) {
+    if inner.recording == recording && inner.file.is_some() {
+        note_write_error(inner, "sync", message);
     }
 }
 
@@ -138,6 +146,7 @@ impl Source {
         let inner = Arc::new(Mutex::new(Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
+            recording: 0,
             paused: false,
             error: None,
             write_error: None,
@@ -146,7 +155,13 @@ impl Source {
         }));
         let shared = inner.clone();
         thread::spawn(move || {
-            endpoint_loop(device, &shared);
+            if cfg!(feature = "ci-audio") {
+                let weak = Arc::downgrade(&shared);
+                drop(shared);
+                synthetic_loop(device, weak);
+            } else {
+                endpoint_loop(device, &shared);
+            }
         });
         Source { inner }
     }
@@ -156,6 +171,7 @@ impl Source {
         let file = BufWriter::new(File::create(path)?);
         let mut inner = self.inner.lock().unwrap();
         inner.file = Some(file);
+        inner.recording = inner.recording.wrapping_add(1);
         inner.paused = false;
         inner.write_error = None;
         Ok(())
@@ -166,8 +182,10 @@ impl Source {
     }
 
     pub fn stop_recording(&self) -> std::io::Result<()> {
-        let write_error = self.inner.lock().unwrap().write_error.take();
-        let file = self.inner.lock().unwrap().file.take();
+        let (write_error, file) = {
+            let mut inner = self.inner.lock().unwrap();
+            (inner.write_error.take(), inner.file.take())
+        };
         // Flush + sync HORS verrou (guards droppés) : les vumètres ne
         // bloquent jamais sur le disque.
         let mut error = write_error;
@@ -218,6 +236,57 @@ impl Source {
     /// Clone sous mutex, jamais de bloc.
     pub fn endpoint(&self) -> Option<CapturedEndpoint> {
         self.inner.lock().unwrap().endpoint.clone()
+    }
+}
+
+/// A fake endpoint for CI. Its samples are generated here, never read from
+/// WASAPI, a default device, saved settings, or an environment-supplied device.
+fn synthetic_loop(device: &str, weak: std::sync::Weak<Mutex<Inner>>) {
+    let frequency = if device == "@DEFAULT_MONITOR@" {
+        880.0
+    } else {
+        440.0
+    };
+    let Some(shared) = weak.upgrade() else { return };
+    shared.lock().unwrap().endpoint = Some(CapturedEndpoint {
+        id: format!("synthetic:{}", tag(device)),
+        friendlyname: format!("Synthetic {frequency} Hz"),
+        direction: expected_dir(device).to_string(),
+        role: "test".into(),
+        state: "active".into(),
+    });
+    drop(shared);
+    let mut converter = Converter {
+        desc: MixDesc {
+            rate: 44_100,
+            channels: 1,
+            kind: SampleKind::F32,
+            blockalign: 4,
+            valid: true,
+        },
+        pos: 0.0,
+    };
+    let mut frame = 0u64;
+    let mut converted = Vec::new();
+    let mut chunks = 0;
+    while let Some(shared) = weak.upgrade() {
+        let packet: Vec<u8> = (0..882)
+            .flat_map(|_| {
+                let sample = (std::f64::consts::TAU * frequency * frame as f64 / 44_100.0).sin()
+                    as f32
+                    * 0.25;
+                frame += 1;
+                sample.to_le_bytes()
+            })
+            .collect();
+        converter.push_packet(&packet, &mut converted);
+        let ready = converted.len() / CHUNK_BYTES * CHUNK_BYTES;
+        for chunk in converted[..ready].chunks_exact(CHUNK_BYTES) {
+            push_chunk(&shared, chunk, &mut chunks);
+        }
+        converted.drain(..ready);
+        drop(shared);
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -546,10 +615,11 @@ fn push_chunk(shared: &Mutex<Inner>, chunk: &[u8], chunks: &mut u64) {
     } else {
         None
     };
+    let recording = inner.recording;
     drop(inner);
     if let Some(file) = sync_clone {
         if let Err(e) = file.sync_data() {
-            note_write_error(&mut shared.lock().unwrap(), "sync", e.to_string());
+            note_sync_error(&mut shared.lock().unwrap(), recording, e.to_string());
         }
     }
 }
@@ -959,6 +1029,63 @@ pub fn to_meter(peak: f32) -> f64 {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "ci-audio")]
+    #[test]
+    fn synthetic_endpoint_records_pauses_and_releases_without_wasapi() {
+        let source = Source::spawn("@DEFAULT_SOURCE@");
+        let weak = Arc::downgrade(&source.inner);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while source.recent_peak(HISTORY) < 0.2 {
+            assert!(Instant::now() < deadline, "synthetic input did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(source.endpoint().unwrap().id, "synthetic:mic");
+        assert!(source.init_error().is_none());
+        let path = std::env::temp_dir().join(format!("mr-synthetic-{}.raw", std::process::id()));
+        source.start_recording(&path).unwrap();
+        let length = || {
+            let inner = source.inner.lock().unwrap();
+            let file = inner.file.as_ref().unwrap();
+            file.get_ref().metadata().unwrap().len() + file.buffer().len() as u64
+        };
+        while length() < CHUNK_BYTES as u64 * 3 {
+            assert!(
+                Instant::now() < deadline,
+                "synthetic recording did not advance"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        source.set_paused(true);
+        let before = length();
+        thread::sleep(Duration::from_millis(80));
+        assert_eq!(length(), before, "paused input wrote samples");
+        source.set_paused(false);
+        while length() <= before {
+            assert!(
+                Instant::now() < deadline,
+                "resumed recording did not advance"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        source.stop_recording().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len() % CHUNK_BYTES, 0);
+        assert!(
+            bytes
+                .chunks_exact(2)
+                .any(|s| i16::from_le_bytes(s.try_into().unwrap()).unsigned_abs() > 6000)
+        );
+        std::fs::remove_file(path).unwrap();
+        drop(source);
+        while weak.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "synthetic input retained the closed source"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn late_wakeups_pad_every_missed_chunk() {
         assert_eq!(missed_chunks(Duration::from_millis(0)), 0);
@@ -974,6 +1101,7 @@ mod tests {
         let mut inner = Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
+            recording: 0,
             paused: false,
             error: None,
             write_error: None,
@@ -983,6 +1111,16 @@ mod tests {
         note_write_error(&mut inner, "write", "disk full".to_owned());
         note_write_error(&mut inner, "flush", "later failure".to_owned());
         assert_eq!(inner.write_error.as_deref(), Some("write: disk full"));
+        inner.write_error = None;
+        inner.recording = 1;
+        let path = std::env::temp_dir().join(format!("mr-windows-sync-{}", std::process::id()));
+        inner.file = Some(BufWriter::new(File::create(&path).unwrap()));
+        note_sync_error(&mut inner, 0, "old failure".into());
+        assert!(inner.write_error.is_none());
+        note_sync_error(&mut inner, 1, "current failure".into());
+        assert_eq!(inner.write_error.as_deref(), Some("sync: current failure"));
+        inner.file.take();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

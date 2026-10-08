@@ -82,6 +82,7 @@ pub fn set_bar_widget_offered() {
 
 /// The saved capture device for `which` (e.g. "mic" or "loopback"): the
 /// stable WASAPI endpoint id, never the friendly name.
+#[cfg(target_os = "windows")]
 pub fn load_capture_device(which: &str) -> Option<String> {
     let settings = load();
     let key = format!("capture_device_{which}");

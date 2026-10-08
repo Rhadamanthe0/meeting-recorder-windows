@@ -74,7 +74,7 @@ fn load() -> Option<Theme> {
 
 fn parse_hex(value: &str) -> Option<Rgb> {
     let hex = value.strip_prefix('#')?;
-    if hex.len() != 6 {
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
@@ -243,6 +243,7 @@ mod tests {
     fn reads_hex_colours() {
         assert_eq!(parse_hex("#ff0000"), Some((1.0, 0.0, 0.0)));
         assert_eq!(parse_hex("ff0000"), None);
+        assert_eq!(parse_hex("#aéabc"), None);
         assert_eq!(hex((1.0, 0.5, 0.0)), "#ff8000");
     }
 

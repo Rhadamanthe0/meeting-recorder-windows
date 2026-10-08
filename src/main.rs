@@ -3,6 +3,7 @@
 //! audio), transcribes it with whisper.cpp after the call, and streams live
 //! levels to a bar widget.
 
+mod action_process;
 mod actions;
 mod agent;
 mod animation;
@@ -24,8 +25,16 @@ mod ui;
 
 use gtk::glib;
 
-pub const APP_ID: &str = "com.jankeesvw.OmarchyMeetingRecorder";
-pub const APP_NAME: &str = "omarchy-meeting-recorder";
+pub const APP_ID: &str = if cfg!(feature = "ci-audio") {
+    "com.jankeesvw.OmarchyMeetingRecorder.CIAudio"
+} else {
+    "com.jankeesvw.OmarchyMeetingRecorder"
+};
+pub const APP_NAME: &str = if cfg!(feature = "ci-audio") {
+    "meeting-recorder-ci-audio"
+} else {
+    "omarchy-meeting-recorder"
+};
 
 /// Whether `arg` opens a meeting: a `.meeting-recorder` file or a meeting
 /// folder. The extension matches case-insensitively: the Windows shell
@@ -52,6 +61,8 @@ fn attach_parent_console() {
 fn main() -> glib::ExitCode {
     #[cfg(windows)]
     attach_parent_console();
+    #[cfg(windows)]
+    platform::configure_bundled_schemas();
     match std::env::args().nth(1).as_deref() {
         None => ui::run(None),
         Some("--version" | "-V") => {
@@ -61,6 +72,9 @@ fn main() -> glib::ExitCode {
                 "CPU-only"
             };
             println!("{APP_NAME} {} ({backend})", env!("CARGO_PKG_VERSION"));
+            if cfg!(feature = "ci-audio") {
+                println!("CI synthetic audio; hardware audio disabled on Windows");
+            }
             glib::ExitCode::SUCCESS
         }
         Some("watch") => {
@@ -73,6 +87,10 @@ fn main() -> glib::ExitCode {
             } else {
                 command.to_owned()
             };
+            if line.len() >= ipc::MAX_LINE {
+                eprintln!("{APP_NAME}: the recording name is too long");
+                return glib::ExitCode::from(2);
+            }
             if ipc::send(&line) {
                 glib::ExitCode::SUCCESS
             } else if command == "start" {
@@ -113,6 +131,9 @@ fn main() -> glib::ExitCode {
             println!();
             println!("  (no command)  open the recorder, ready to record");
             println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
+            println!("  new-window    open another recorder window");
+            println!("  transcribe-file <audio> [--speakers N] [--language xx] [--model name]");
+            println!("  diarize <audio> [--speakers N]   print speaker turns as JSON");
             println!("  start [name]  start recording, opening the recorder if needed");
             println!("  stop          stop the running recording (for a keybinding)");
             println!("  compact       switch the recording window between full and compact");

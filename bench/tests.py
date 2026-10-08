@@ -142,6 +142,16 @@ class ShortReplies(unittest.TestCase):
 
 
 class Thresholds(unittest.TestCase):
+    def test_errors_fail_even_without_thresholds(self):
+        self.assertEqual(check({"ami": {"error": "process failed"}}, {}),
+                         ["ami: process failed"])
+
+    def test_missing_measurements_do_not_pass(self):
+        limits = {"min": {"found": 0}, "max": {"lines": 0}, "all_speakers": True}
+        failures = check({"case": {}}, {"case": limits})
+        self.assertEqual(len(failures), 3)
+        self.assertTrue(all("missing" in failure for failure in failures))
+
     def test_checker_catches_low_recall_and_high_wer(self):
         thresholds = {"case": {"min": {"found": 0.9, "person": 0.9},
                                "max": {"leaked": 0, "wer": 0.2}}}

@@ -134,31 +134,32 @@ pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn decode_raw_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let output = crate::platform::silent_command(crate::export::ffmpeg())
-        .args([
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-f",
-            "s16le",
-            "-ar",
-            &RATE.to_string(),
-            "-ac",
-            &CHANNELS.to_string(),
-            "-i",
-        ])
-        .arg(path)
-        .args([
-            "-f",
-            "f32le",
-            "-ac",
-            "1",
-            "-ar",
-            &WHISPER_RATE.to_string(),
-            "-",
-        ])
-        .output()
-        .map_err(|e| format!("could not run ffmpeg: {e}"))?;
+    let output = crate::action_process::output(
+        crate::platform::silent_command(crate::export::ffmpeg())
+            .args([
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "s16le",
+                "-ar",
+                &RATE.to_string(),
+                "-ac",
+                &CHANNELS.to_string(),
+                "-i",
+            ])
+            .arg(path)
+            .args([
+                "-f",
+                "f32le",
+                "-ac",
+                "1",
+                "-ar",
+                &WHISPER_RATE.to_string(),
+                "-",
+            ]),
+    )
+    .map_err(|e| format!("could not run ffmpeg: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "ffmpeg could not decode {}: {}",
@@ -176,20 +177,21 @@ fn decode_raw_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let output = crate::platform::silent_command(crate::export::ffmpeg())
-        .args(["-nostdin", "-loglevel", "error", "-i"])
-        .arg(path)
-        .args([
-            "-f",
-            "f32le",
-            "-ac",
-            "1",
-            "-ar",
-            &WHISPER_RATE.to_string(),
-            "-",
-        ])
-        .output()
-        .map_err(|e| format!("could not run ffmpeg: {e}"))?;
+    let output = crate::action_process::output(
+        crate::platform::silent_command(crate::export::ffmpeg())
+            .args(["-nostdin", "-loglevel", "error", "-i"])
+            .arg(path)
+            .args([
+                "-f",
+                "f32le",
+                "-ac",
+                "1",
+                "-ar",
+                &WHISPER_RATE.to_string(),
+                "-",
+            ]),
+    )
+    .map_err(|e| format!("could not run ffmpeg: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "ffmpeg could not decode {}: {}",
@@ -558,64 +560,75 @@ pub fn download(
     ));
     emit(events, Event::Stage(label.to_owned()));
 
+    if abort.load(Ordering::Relaxed) {
+        return Err(CANCELLED.into());
+    }
     let response = ureq::get(url)
+        .config()
+        .timeout_connect(Some(std::time::Duration::from_secs(30)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(30)))
+        // Models can exceed a gigabyte; bound stalled transfers while
+        // allowing a slow connection to finish a normal download.
+        .timeout_global(Some(std::time::Duration::from_secs(2 * 3600)))
+        .build()
         .call()
         .map_err(|e| format!("could not download {url}: {e}"))?;
     let total = response.body().content_length();
     let mut reader = response.into_body().into_reader();
-    let mut file = BufWriter::new(
-        File::options()
-            .write(true)
-            .create_new(true)
-            .open(&part)
-            .map_err(|e| e.to_string())?,
-    );
-    let mut buf = vec![0u8; 1 << 16];
-    let (mut done, mut last_pct) = (0u64, u64::MAX);
-    loop {
-        if abort.load(Ordering::Relaxed) {
-            drop(file);
-            let _ = std::fs::remove_file(&part);
-            return Err(CANCELLED.into());
-        }
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("download interrupted: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        if let Some(total) = total.filter(|t| *t > 0) {
-            let pct = done * 100 / total;
-            if pct != last_pct {
-                last_pct = pct;
-                emit(events, Event::Stage(format!("{label} {pct}%")));
-                emit(events, Event::Progress(done as f64 / total as f64));
+    let file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .map_err(|e| e.to_string())?;
+    // Cleanup also covers read/write/flush errors, after the file handle has
+    // been closed (required on Windows).
+    let result = (|| {
+        let mut file = BufWriter::new(file);
+        let mut buf = vec![0u8; 1 << 16];
+        let (mut done, mut last_pct) = (0u64, u64::MAX);
+        loop {
+            if abort.load(Ordering::Relaxed) {
+                return Err(CANCELLED.into());
+            }
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("download interrupted: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            done += n as u64;
+            if let Some(total) = total.filter(|t| *t > 0) {
+                let pct = done * 100 / total;
+                if pct != last_pct {
+                    last_pct = pct;
+                    emit(events, Event::Stage(format!("{label} {pct}%")));
+                    emit(events, Event::Progress(done as f64 / total as f64));
+                }
             }
         }
-    }
-    file.flush().map_err(|e| e.to_string())?;
-    file.get_ref().sync_data().map_err(|e| e.to_string())?;
-    drop(file);
-    if total.is_some_and(|t| t != done) || done < min_bytes {
-        let _ = std::fs::remove_file(&part);
-        if valid(target) {
-            // Another downloader filled the target in the meantime.
-            return Ok(());
-        }
-        return Err(format!("the download of {url} was incomplete"));
-    }
-    match std::fs::rename(&part, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&part);
+        file.flush().map_err(|e| e.to_string())?;
+        file.get_ref().sync_data().map_err(|e| e.to_string())?;
+        drop(file);
+        if total.is_some_and(|t| t != done) || done < min_bytes {
             if valid(target) {
+                // Another downloader filled the target in the meantime.
                 return Ok(());
             }
-            Err(e.to_string())
+            return Err(format!("the download of {url} was incomplete"));
         }
-    }
+        match std::fs::rename(&part, target) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if valid(target) {
+                    return Ok(());
+                }
+                Err(e.to_string())
+            }
+        }
+    })();
+    let _ = std::fs::remove_file(&part);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -966,8 +979,7 @@ pub fn transcribe_single(
         language,
         duration_secs,
         diarization_failed,
-        events,
-        abort,
+        (events, abort),
     )
 }
 
@@ -979,9 +991,9 @@ fn whisper_pass(
     language: &str,
     duration_secs: i64,
     diarization_failed: bool,
-    events: &Events,
-    abort: &Abort,
+    reporting: (&Events, &Abort),
 ) -> Result<Transcript, String> {
+    let (events, abort) = reporting;
     let context = load_whisper(events, abort)?;
     let (segments, detected) = side_pass(
         &context,
@@ -1506,7 +1518,7 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
                 None => return usage(),
             },
             "--speakers" | "-s" => match iter.next().and_then(|n| n.parse::<usize>().ok()) {
-                Some(n) if n > 0 => speakers = Some(n),
+                Some(n) if (1..=8).contains(&n) => speakers = Some(n),
                 _ => return usage(),
             },
             _ => files.push(PathBuf::from(arg)),
@@ -1583,6 +1595,39 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_download_removes_its_partial_file() {
+        use std::net::TcpListener;
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut client, _) = server.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = client.read(&mut request);
+            client
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial")
+                .unwrap();
+        });
+        let dir =
+            std::env::temp_dir().join(format!("mr-interrupted-download-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _rx) = async_channel::unbounded();
+        assert!(
+            download(
+                &url,
+                &dir.join("model.bin"),
+                "Test",
+                100,
+                &events,
+                &Abort::default()
+            )
+            .is_err()
+        );
+        worker.join().unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir(&dir).unwrap();
+    }
 
     fn line(start_ms: i64, speaker: &str, text: &str) -> Segment {
         Segment {

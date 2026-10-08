@@ -3,7 +3,7 @@
 
     bench/run.py [--bin PATH] [--case NAME ...] [--ami] [--json FILE]
 
---bin     the binary to test (default: target/release/omarchy-meeting-recorder)
+--bin     the binary to test (default: target/release/meeting-recorder-windows[.exe])
 --case    only these cases (default: all)
 --ami     also a real meeting from the AMI corpus, downloaded to bench/.cache
 --ami-minutes  how much of that meeting (default 5, 0 for all 17 minutes)
@@ -306,7 +306,8 @@ def fixtures():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bin", default=str(HERE.parent / "target/release/omarchy-meeting-recorder"))
+    binary = "meeting-recorder-windows.exe" if sys.platform == "win32" else "meeting-recorder-windows"
+    parser.add_argument("--bin", default=str(HERE.parent / "target/release" / binary))
     parser.add_argument("--case", nargs="*")
     parser.add_argument("--ami", action="store_true")
     parser.add_argument("--ami-minutes", type=int, default=5)
@@ -315,9 +316,14 @@ def main():
     parser.add_argument("--model")
     parser.add_argument("--keep")
     args = parser.parse_args()
+    if args.ami_minutes < 0:
+        parser.error("--ami-minutes must be non-negative")
 
     cases = list(fixtures()) + (ami_cases(args.ami_minutes) if args.ami else [])
     if args.case:
+        unknown = set(args.case) - {c["name"] for c in cases}
+        if unknown:
+            parser.error("unknown cases: " + ", ".join(sorted(unknown)))
         cases = [c for c in cases if c["name"] in args.case]
     model = ["--model", args.model] if args.model else []
     if args.keep:
@@ -371,24 +377,30 @@ def main():
 def check(results, thresholds):
     """`min` scores must be reached, `max` counts (leaked lines, lines in
     silence, speaker error) not exceeded, and every voice found."""
-    failures = []
+    failures = [f"{name}: {r['error']}" for name, r in results.items() if "error" in r]
     for name, limits in thresholds.items():
         r = results.get(name)
         if r is None:
             continue
         if "error" in r:
-            failures.append(f"{name}: {r['error']}")
             continue
         for key, least in limits.get("min", {}).items():
-            if r.get(key, 0) < least:
+            if key not in r:
+                failures.append(f"{name}: missing {key}")
+            elif r[key] < least:
                 failures.append(f"{name}: {key} {r.get(key, 0):.1%} is below {least:.1%}")
         for key, most in limits.get("max", {}).items():
-            if r.get(key, 0) > most:
+            if key not in r:
+                failures.append(f"{name}: missing {key}")
+            elif r[key] > most:
                 failures.append(f"{name}: {key} {r.get(key, 0)} is above {most}")
-        if limits.get("all_speakers") and "speakers" in r:
-            found, wanted = r["speakers"].split("/")
-            if found != wanted:
-                failures.append(f"{name}: found {found} of {wanted} speakers")
+        if limits.get("all_speakers"):
+            if "speakers" not in r:
+                failures.append(f"{name}: missing speakers")
+            else:
+                found, wanted = r["speakers"].split("/")
+                if found != wanted:
+                    failures.append(f"{name}: found {found} of {wanted} speakers")
     return failures
 
 

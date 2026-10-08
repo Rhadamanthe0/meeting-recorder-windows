@@ -153,4 +153,4 @@ and `examples/actions/publish-transcript` (`bash`, calls
 assume a Unix setup and the Unix binary name: they do not run as-is on
 Windows. Adapt them (Python via `py`, GitHub CLI for Windows, installed exe
 `"%LOCALAPPDATA%\Programs\MeetingRecorder\meeting-recorder-windows.exe"`) instead of running them directly.
-They are intentionally left untouched.
+These examples retain their Unix command assumptions.

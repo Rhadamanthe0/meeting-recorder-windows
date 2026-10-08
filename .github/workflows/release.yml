@@ -266,8 +266,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "collect-runtime.ps1 exit $LASTEXITCODE (stage partiel refusé)" }
           Set-Location packaging/windows
           heat dir stage -cg HarvestedFiles -gg -scom -sreg -sfrag -srd -dr INSTALLFOLDER -var var.StageDir -t harvest.xsl -out stage-files.wxs
+          if ($LASTEXITCODE -ne 0) { throw "heat exit $LASTEXITCODE" }
           candle "-dStageDir=stage" "-dVersion=$version" Product.wxs stage-files.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle exit $LASTEXITCODE" }
           light -ext WixUIExtension -sice:ICE38 -sice:ICE43 -sice:ICE64 -o "MeetingRecorder-$version.msi" Product.wixobj stage-files.wixobj
+          if ($LASTEXITCODE -ne 0) { throw "light exit $LASTEXITCODE" }
           Get-ChildItem *.msi | ForEach-Object { Write-Output ("[ci] msi: " + $_.FullName + " (" + $_.Length + " o)") }
 
       # Le MSI publié est exactement celui testé ici : installation
@@ -275,32 +278,6 @@ jobs:
       # ucrt64/bin au PATH (la closure embarquée doit suffire), ffmpeg
       # embarqué fonctionnel, puis désinstallation. Mêmes contrôles que
       # windows.yml : un MSI incomplet ne doit jamais atteindre la release.
-      - name: Test MSI per-user (celui qui sera publié)
-        run: |
-          $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
-          if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
-          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
-          $install = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$log`"" -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
-            throw "msiexec /i exit $($install.ExitCode)"
-          }
-          $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
-          if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
-          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
-          $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
-          if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
-          if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt" }
-          Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
-          $ffExe = Join-Path (Split-Path $exe -Parent) "ffmpeg.exe"
-          if (-not (Test-Path -LiteralPath $ffExe)) { throw "ffmpeg.exe embarqué introuvable : $ffExe" }
-          $ffOut = & $ffExe -version 2>&1 | Select-Object -First 3
-          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe embarqué -version exit $LASTEXITCODE" }
-          if (-not $ffOut) { throw "ffmpeg.exe embarqué -version sans sortie (binaire corrompu ?)" }
-          $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
-          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }
-
       - name: Upload MSI Windows x86_64
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -311,7 +288,7 @@ jobs:
           path: packaging/windows/*.msi
 
   release:
-    needs: build
+    needs: [build, verify-msi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -338,3 +315,41 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify-msi:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Download MSI construit
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-msi
+          path: packaging/windows
+      - name: Test MSI per-user (celui qui sera publié)
+        run: |
+          $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
+          $log = Join-Path $env:RUNNER_TEMP "msi-install.log"
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart /L*v `"$log`"" -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
+            throw "msiexec /i exit $($install.ExitCode)"
+          }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder\meeting-recorder-windows.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "exe installé introuvable : $exe" }
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and $_ -notmatch 'msys|ucrt64|mingw|UCRT_BIN' }) -join ';'
+          $helpProc = Start-Process $exe -ArgumentList "--help" -Wait -NoNewWindow -RedirectStandardOutput out.txt -PassThru
+          if ($helpProc.ExitCode -ne 0) { throw "exe --help exit $($helpProc.ExitCode) (closure DLL incomplète ?)" }
+          if (-not (Select-String -Path out.txt -Pattern "Usage" -Quiet)) { Get-Content out.txt -ErrorAction SilentlyContinue; throw "exe --help sans 'Usage' dans out.txt" }
+          Write-Output "[ci] MSI per-user OK, exe --help OK sans UCRT au PATH"
+          $ffExe = Join-Path (Split-Path $exe -Parent) "ffmpeg.exe"
+          if (-not (Test-Path -LiteralPath $ffExe)) { throw "ffmpeg.exe embarqué introuvable : $ffExe" }
+          $ffOut = & $ffExe -version 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg.exe embarqué -version exit $LASTEXITCODE" }
+          if (-not $ffOut) { throw "ffmpeg.exe embarqué -version sans sortie (binaire corrompu ?)" }
+          $ffOut | ForEach-Object { Write-Output "[ci] bundled ffmpeg: $_" }
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "msiexec /x exit $($uninstall.ExitCode)" }

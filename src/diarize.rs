@@ -217,13 +217,16 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--speakers" | "-s" => speakers = iter.next().and_then(|n| n.parse::<usize>().ok()),
-            other => path = Some(PathBuf::from(other)),
+            "--speakers" | "-s" => match iter.next().and_then(|n| n.parse::<usize>().ok()) {
+                Some(n) if (1..=8).contains(&n) => speakers = Some(n),
+                _ => return usage(),
+            },
+            other if !other.starts_with('-') && path.is_none() => path = Some(PathBuf::from(other)),
+            _ => return usage(),
         }
     }
     let Some(path) = path else {
-        eprintln!("Usage: {} diarize <audio> [--speakers N]", crate::APP_NAME);
-        return gtk::glib::ExitCode::from(2);
+        return usage();
     };
     let result = crate::transcribe::load_track(&path).and_then(|samples| {
         let (events, _rx) = async_channel::unbounded();
@@ -257,6 +260,14 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
             gtk::glib::ExitCode::FAILURE
         }
     }
+}
+
+fn usage() -> gtk::glib::ExitCode {
+    eprintln!(
+        "Usage: {} diarize <audio> [--speakers 1..8]",
+        crate::APP_NAME
+    );
+    gtk::glib::ExitCode::from(2)
 }
 
 #[cfg(test)]

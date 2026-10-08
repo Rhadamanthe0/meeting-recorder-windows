@@ -47,6 +47,9 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
+use crate::action_process as probe_process;
+
 /// A meeting transcript is a long prompt; anything past this means the agent
 /// is stuck rather than thinking.
 pub const TIMEOUT: Duration = Duration::from_secs(300);
@@ -145,21 +148,13 @@ impl std::fmt::Display for Unavailable {
     }
 }
 
-/// The default agent, or None when there is none or it cannot run without tools.
-pub fn default_agent() -> Option<Agent> {
-    status().ok()
-}
-
 /// The default agent, or why it cannot be used.
 #[cfg(target_os = "linux")]
 pub fn status() -> Result<Agent, Unavailable> {
-    let id = Command::new("omarchy-default-agent")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
+    let id = probe(&mut Command::new("omarchy-default-agent"), PROBE_TIMEOUT)
         .ok()
         .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
+            String::from_utf8_lossy(&out)
                 .lines()
                 .next()
                 .unwrap_or("")
@@ -265,28 +260,53 @@ fn ori_harness() -> Option<&'static str> {
 /// pipe the JSON arrives cut off at 64 KiB.
 #[cfg(target_os = "linux")]
 fn opencode_tools_off() -> bool {
-    let Ok(dir) = workdir() else { return false };
-    let out = dir.join("agent.json");
-    let ok = std::fs::File::create(&out)
-        .ok()
-        .and_then(|file| {
-            Command::new("opencode")
-                .args(["debug", "agent", OPENCODE_AGENT])
-                .env("OPENCODE_CONFIG_CONTENT", OPENCODE_AGENT_CONFIG)
-                .current_dir(&dir)
-                .stdin(Stdio::null())
-                .stdout(file)
-                .stderr(Stdio::null())
-                .status()
-                .ok()
-        })
-        .is_some()
-        && read_bounded(&out, MAX_STREAM_BYTES)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .is_some_and(|value| tools_all_false(&value["tools"]));
-    let _ = std::fs::remove_dir_all(&dir);
-    ok
+    probe(
+        Command::new("opencode")
+            .args(["debug", "agent", OPENCODE_AGENT])
+            .env("OPENCODE_CONFIG_CONTENT", OPENCODE_AGENT_CONFIG),
+        PROBE_TIMEOUT,
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    .is_some_and(|value| tools_all_false(&value["tools"]))
+}
+
+/// Bound probes as well as chat calls. A hung probe otherwise leaves the
+/// UI pending forever. Terminate descendants before reading or cleanup.
+#[cfg(target_os = "linux")]
+fn probe(command: &mut Command, timeout: Duration) -> std::io::Result<Vec<u8>> {
+    let dir = workdir()?;
+    let output = dir.join("probe.txt");
+    let result = (|| {
+        command
+            .current_dir(&dir)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(std::fs::File::create(&output)?);
+        let mut process = probe_process::ActionProcess::spawn(command)?;
+        let started = Instant::now();
+        loop {
+            if std::fs::metadata(&output).is_ok_and(|m| m.len() > MAX_STREAM_BYTES) {
+                return Err(std::io::Error::other("agent probe output is too large"));
+            }
+            match process.child.try_wait()? {
+                Some(status) if status.success() => {
+                    process.terminate();
+                    return read_bounded(&output, MAX_STREAM_BYTES);
+                }
+                Some(_) => return Err(std::io::Error::other("agent probe failed")),
+                None if started.elapsed() >= timeout => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "agent probe timed out",
+                    ));
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    })();
+    let _ = std::fs::remove_dir_all(dir);
+    result
 }
 
 /// Every value false, and at least one: an empty object would pass a check
@@ -523,26 +543,26 @@ fn run_in(agent: &Agent, prompt: &str, dir: &Path) -> Result<String, String> {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() > TIMEOUT + KILL_GRACE * 2 => break None,
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                finish_agent(&mut child, writer);
+                return Err(e.to_string());
+            }
         }
     };
     let Some(status) = status else {
-        kill_group(child.id(), "TERM");
+        kill_group(child.id(), libc::SIGTERM);
         let deadline = Instant::now() + KILL_GRACE;
         while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
             std::thread::sleep(Duration::from_millis(100));
         }
-        kill_group(child.id(), "KILL");
-        let _ = child.wait();
+        finish_agent(&mut child, writer);
         return Err(format!(
             "{} did not answer within {} seconds",
             agent.name,
             TIMEOUT.as_secs()
         ));
     };
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
+    finish_agent(&mut child, writer);
 
     let stdout = read_bounded(&out_path, MAX_STREAM_BYTES).unwrap_or_default();
     let stderr = read_bounded(&err_path, MAX_STREAM_BYTES).unwrap_or_default();
@@ -734,11 +754,22 @@ fn workdir() -> std::io::Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn kill_group(pid: u32, signal: &str) {
-    let _ = Command::new("kill")
-        .args([&format!("-{signal}"), "--", &format!("-{pid}")])
-        .stderr(Stdio::null())
-        .status();
+fn kill_group(pid: u32, signal: libc::c_int) {
+    // SAFETY: a negative PID addresses only the agent's own process group.
+    unsafe { libc::kill(-(pid as libc::pid_t), signal) };
+}
+
+#[cfg(target_os = "linux")]
+fn finish_agent(child: &mut std::process::Child, writer: Option<std::thread::JoinHandle<()>>) {
+    // An agent can exit while a descendant still holds stdin open. Kill the
+    // group before joining the writer, otherwise a full prompt can hang here
+    // indefinitely, after the timeout loop has already finished.
+    kill_group(child.id(), libc::SIGKILL);
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
 }
 
 /// A symlink to `src` at `dest`, only when `src` is a regular file and not
@@ -784,33 +815,15 @@ pub const LM_STUDIO_BASE: &str = "http://localhost:1234/v1";
 #[cfg(target_os = "windows")]
 pub const OLLAMA_BASE: &str = "http://localhost:11434/v1";
 /// How long a probe of one server may take; the chat call itself uses TIMEOUT.
-#[cfg(target_os = "windows")]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The configured model and the servers to try, in order.
 #[cfg(target_os = "windows")]
 fn llm_config() -> (Vec<String>, String) {
-    let (mut base, mut model) = (None, None);
-    let path = crate::platform::config_dir()
-        .join(crate::APP_NAME)
-        .join("config.toml");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let value = value.trim().trim_matches('"').trim().to_owned();
-            if value.is_empty() {
-                continue;
-            }
-            match key.trim() {
-                "llm_base_url" => base = Some(value.trim_end_matches('/').to_owned()),
-                "llm_model" => model = Some(value),
-                _ => {}
-            }
-        }
-    }
+    let text = std::fs::read_to_string(crate::models::config_file()).unwrap_or_default();
+    let base = crate::models::config_value(&text, "llm_base_url")
+        .map(|value| value.trim().trim_end_matches('/').to_owned());
+    let model = crate::models::config_value(&text, "llm_model");
     let bases = base.map_or_else(
         || vec![LM_STUDIO_BASE.to_owned(), OLLAMA_BASE.to_owned()],
         |b| vec![b],
@@ -961,6 +974,52 @@ pub fn cli(args: &[String]) -> gtk::glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_exited_agent_cannot_leave_the_prompt_writer_blocked() {
+        let mut child = Command::new("setsid")
+            .args(["sh", "-c", "sleep 2 <&0 & exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&vec![b'x'; MAX_REQUEST_BYTES]);
+        });
+        assert!(child.wait().unwrap().success());
+        let started = Instant::now();
+        finish_agent(&mut child, Some(writer));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn probes_timeout_and_reject_oversized_output() {
+        let started = Instant::now();
+        let error = probe(
+            Command::new("sh").args(["-c", "sleep 30 & wait"]),
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let output = probe(
+            Command::new("sh").args(["-c", &format!("head -c {} /dev/zero", MAX_STREAM_BYTES + 1)]),
+            Duration::from_secs(5),
+        );
+        assert!(output.unwrap_err().to_string().contains("too large"));
+        assert_eq!(
+            probe(
+                Command::new("sh").args(["-c", "printf ready"]),
+                Duration::from_secs(5)
+            )
+            .unwrap(),
+            b"ready"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     fn args(built: &Built) -> Vec<String> {

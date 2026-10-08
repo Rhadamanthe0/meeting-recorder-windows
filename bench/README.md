@@ -4,10 +4,10 @@ A small test suite for the transcription and the speakers: it runs the app's own
 
 ```bash
 cargo build --release
-bench/run.py                          # the six cases in fixtures/, about two minutes
+bench/run.py                          # the six cases in fixtures/, duration depends on CPU and model
 bench/run.py --ami                    # plus the first 5 minutes of a real AMI meeting (downloads about 170 MB once)
 bench/run.py --ami --ami-minutes 0    # the whole 17 minute meeting
-bench/run.py --ami --check            # fail when a case scores below thresholds.json, as CI does
+bench/run.py --ami --check            # fail when a case scores below thresholds.json
 bench/run.py --bin /usr/bin/omarchy-meeting-recorder --json old.json    # any other build
 bench/run.py --case room music        # only some cases
 ```
@@ -46,7 +46,7 @@ For AMI there is no script, so side and person are measured by who was speaking 
 
 ## In CI
 
-The automated checks run `bench/tests.py` in CI via `.github/workflows/windows.yml`. There is no `bench.yml`: the audio bench above is manual, it needs microphones, speakers and minutes of audio that CI does not have. Run it locally before changing transcription, diarization or scoring, and keep `thresholds.json` honest with what you measured.
+The automated checks run `bench/tests.py` in CI via `.github/workflows/windows.yml`. There is no `bench.yml`: the full audio bench above is manual and needs the built binary, ffmpeg, the models and processing time. It reads the committed fixtures and does not require a microphone or speakers. Run it locally before changing transcription, diarization or scoring, and keep `thresholds.json` honest with what you measured.
 
 ## Making new cases
 
