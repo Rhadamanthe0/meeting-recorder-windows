@@ -73,15 +73,13 @@ supprime le diagnostic Windows confirmé sans désactiver de contrôle.
 - Résoudre l'échec de couverture de diarisation sur import avec une cause et
   une correction validées ; aucun ajustement arbitraire des seuils ou du
   modèle n'a été appliqué pour obtenir un résultat vert.
-- La compilation complète Windows GNU tentée s'arrête dans glib-sys :
-  environnement pkg-config/GTK Windows absent. Exécuter sur Windows les
-  contrôles du projet, les nouveaux tests de permissions IPC et de manifestes,
-  ainsi que l'accès IPC entre deux comptes, la capture/lecture WASAPI et les
-  parcours GTK. Vérifier installation, mise à jour et désinstallation MSI.
-- Valider sur Windows la fermeture sur crash des outils ffmpeg.exe et
-  ffprobe.exe désormais confinés. Les tests Linux du helper et la vérification
-  de types Windows isolée réussissent ; ce n’est pas une preuve de comportement
-  natif Windows.
+- Le check, les 80 tests et le build release Windows ont réussi dans le run
+  `37776726518`, y compris les tests de confinement, de pipe privé et de
+  manifestes. Revalider sur l'état corrigé les contrôles devenus bloquants,
+  le nouveau downmix, la simulation audio, le rendu GTK et le packaging MSI.
+  L'accès IPC entre deux comptes et la mise à jour MSI restent à vérifier.
+- Les captures et lectures WASAPI matérielles ne sont pas autorisées sur le
+  PC personnel ; la simulation ne valide pas les pilotes ni le hotplug.
 - L'intégration Quickshell/Omarchy, Vulkan et les sources C/C++ amont n'ont pas
   reçu une validation exhaustive dans cet environnement.
 - Après ces contrôles et corrections, reprendre deux audits complets sans
@@ -94,7 +92,7 @@ ancien commit. Le workflow `.github/workflows/windows.yml` prépare Rust GNU,
 GTK/MSYS2, FFmpeg et ONNX Runtime puis exécute formatage, tests Python,
 `cargo check --locked`, `cargo test --locked`, Clippy, build release et contrôle
 d’installation MSI. Une exécution sur Windows de cet état, accompagnée des
-parcours matériels et UI décrits plus haut, est nécessaire pour lever le blocage.
+parcours UI et audio synthétiques décrits plus bas, est nécessaire pour lever le blocage.
 Une exécution de ce workflow sur la branche de test est maintenant en cours.
 
 La phase locale précédente n’avait effectué aucun commit ni push. La reprise
@@ -176,3 +174,11 @@ et le pipe GUI sont déplacés dans `verify-gui` sur une VM Windows GitHub ;
 le runner personnel ne lance jamais l’interface. YAML, séparation des jobs,
 41 blocs/scripts PowerShell et `git diff --check` réussissent localement.
 La nouvelle validation native reste à obtenir ; compteur **0/2**.
+
+Le run `37785634562` a réussi la préparation PowerShell/Rust, MSYS2/GTK,
+FFmpeg/ORT, les gardes, le formatage et les tests Python, puis `cargo check`
+a été interrompu à 13:46 UTC. Le propriétaire confirme avoir redémarré
+le service du runner et indique qu'il est à nouveau actif. Le contrôle est
+incomplet et ne compte pas comme réussi. L'audit des 278 dépendances relancé
+le 8 octobre réussit, sans vulnérabilité connue signalée. Les commentaires
+de CI ne donnent plus une version Cargo 0.1.11 obsolète (le dépôt est 0.1.13).

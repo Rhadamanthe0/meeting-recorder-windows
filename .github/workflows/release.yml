@@ -194,8 +194,8 @@ jobs:
           $env:PATH = "$bin;$env:PATH"
           ffmpeg.exe -version | Select-Object -First 2
 
-      # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
-      # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked
+      # Lockfile autoritaire : Cargo.lock complet commité, dépendances Windows
+      # incluses. --locked
       # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
       # à jour par PR relue, pas en CI.
       # Contrôle sur le lock commité.

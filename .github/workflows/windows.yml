@@ -152,8 +152,8 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
-      # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
-      # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked
+      # Lockfile autoritaire : Cargo.lock complet commité, dépendances Windows
+      # incluses. --locked
       # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
       # à jour par PR relue, pas en CI.
       # Guard A (bloquant) : tout spawn Windows doit passer par
