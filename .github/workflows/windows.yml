@@ -23,6 +23,7 @@ jobs:
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
       # Le compte de service français « Système » a un nom non ASCII.
       # Les outils natifs MSYS2 doivent interpréter ses chemins en UTF-8.
       LANG: C.UTF-8
@@ -60,6 +61,21 @@ jobs:
           # Garder les compilations déjà réussies lorsqu'un test échoue ;
           # les validations restent toutes réexécutées au run suivant.
           cache-on-failure: true
+          # Le cache précédent remplaçait les proxies rustup par des liens
+          # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
+          cache-bin: false
+          prefix-key: v1-gnu-no-proxies
+
+      - name: Vérifie GNU après restauration du cache
+        run: |
+          foreach ($tool in @("rustc", "cargo")) {
+            $version = & $tool -Vv
+            if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
+            $version | ForEach-Object { Write-Output $_ }
+            if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
+              throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
+            }
+          }
 
       - name: Install GTK4 (MSYS2 UCRT64)
         id: msys2-tools
@@ -252,6 +268,14 @@ jobs:
       - name: Clippy (bloquant)
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      # Ces contrôles ne doivent pas attendre que le packaging MSI réussisse.
+      - name: Test audio synthétique (aucun périphérique réel)
+        run: |
+          cargo test --locked --features ci-audio
+          if ($LASTEXITCODE -ne 0) { throw "Tests ci-audio en échec" }
+          cargo clippy --locked --all-targets --features ci-audio -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "Clippy ci-audio en échec" }
+
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
       - name: Diagnostic libs statiques
         if: always()
@@ -276,7 +300,8 @@ jobs:
           if (-not (Test-Path -LiteralPath $objdump)) { throw "objdump.exe introuvable ($objdump) : impossible de vérifier le subsystem PE" }
           $hdr = & $objdump -p target/release/meeting-recorder-windows.exe
           if ($LASTEXITCODE -ne 0) { throw "objdump -p exit $LASTEXITCODE" }
-          $hdr | ForEach-Object { Write-Output "[ci] objdump: $_" }
+          # Le dump complet générait plus de 40 Mo de logs d'imports.
+          $hdr | Where-Object { $_ -match 'Subsystem' } | ForEach-Object { Write-Output "[ci] objdump: $_" }
           if (-not ($hdr | Where-Object { $_ -match 'Subsystem\s+.*Windows GUI' })) { throw "subsystem PE inattendu (pas Windows GUI) : l'exe ouvrirait une console au double-clic" }
           Write-Output "[ci] guard subsystem GUI OK"
 
@@ -322,10 +347,6 @@ jobs:
       # La version ci-audio génère des tons et utilise une sortie silencieuse.
       - name: Build test audio synthétique (aucun périphérique réel)
         run: |
-          cargo test --locked --features ci-audio
-          if ($LASTEXITCODE -ne 0) { throw "Tests ci-audio en échec" }
-          cargo clippy --locked --all-targets --features ci-audio -- -D warnings
-          if ($LASTEXITCODE -ne 0) { throw "Clippy ci-audio en échec" }
           cargo build --release --locked --features ci-audio
           if ($LASTEXITCODE -ne 0) { throw "Build ci-audio en échec" }
           $versionLog = Join-Path $env:RUNNER_TEMP "meeting-recorder-synthetic-version.log"

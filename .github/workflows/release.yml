@@ -34,6 +34,7 @@ jobs:
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
       # Même locale UTF-8 que le build Windows exécuté en service.
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
@@ -101,6 +102,20 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          prefix-key: v1-gnu-no-proxies
+
+      - name: Vérifie GNU après restauration du cache
+        run: |
+          foreach ($tool in @("rustc", "cargo")) {
+            $version = & $tool -Vv
+            if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
+            $version | ForEach-Object { Write-Output $_ }
+            if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
+              throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
+            }
+          }
 
       - name: Install GTK4 (MSYS2 UCRT64)
         id: msys2-tools

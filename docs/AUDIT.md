@@ -213,3 +213,34 @@ et attend la sortie des processus qu'il lance. Toutes les signatures et
 les codes d'erreur restent bloquants ; aucune clé ni vérification n'est supprimée.
 Le chemin d'installation exposé vient directement de l'action, sans deviner
 le dossier du runner. L'exécution native reste à obtenir. Compteur **0/2**.
+
+Le run `37792349599` (`2555b13`) réussit l'initialisation MSYS2, les mises à
+jour complètes et l'installation GTK/UCRT64 sans arrêt global de processus.
+Les gardes, rustfmt et les 18 tests Python réussissent également. Windows
+refuse ensuite de lancer `C:\ProgramData\cargo\bin\cargo.exe` pour
+`cargo check` (« Aucune application n'est associée au fichier spécifié »).
+Il ne s'agit pas d'un diagnostic de compilation Rust. Le run `37795814144`
+(`c32abcc`) conserve le contrôle bloquant et ajoute le chemin, la taille,
+l'empreinte SHA-256 et la chaîne d'exceptions du binaire réellement lancé.
+Son résultat reste à obtenir. Les validations locales relancées sur cet état
+réussissent : fmt, check all-targets, Clippy ci-audio all-targets, 74 tests
+Rust ci-audio, 18 tests Python, quatre YAML, 44 blocs/scripts PowerShell et
+`git diff --check`. Des avertissements de bindings générés de whisper-rs-sys
+subsistent ; aucun avertissement du code principal n'est accepté par Clippy.
+Compteur **0/2**, notamment en raison du banc audio import encore en échec.
+
+Le run `37795814144` lance effectivement Cargo, mais compile pour
+`x86_64-pc-windows-msvc` et sélectionne Visual Studio, alors que Rust GNU
+avait été annoncé avant la restauration du cache. La préparation GTK reste
+correcte ; Whisper échoue avec MSBuild/FTK1011. Le cache restaurait aussi
+`CARGO_HOME/bin`, avec un `cargo.exe` lié (taille de lien nulle mais empreinte
+de contenu non vide). Les workflows Windows et release excluent désormais
+les exécutables du cache et utilisent un nouvel espace de clés, pour ne pas
+extraire les anciennes archives qui les contiennent encore. La toolchain GNU
+est fixée dans l'environnement et les hôtes effectifs de Rustc et Cargo sont
+vérifiés après restauration, avant la longue préparation GTK.
+Les tests/Clippy synthétiques passent avant le packaging, pour qu'une erreur
+MSI ne les empêche plus de tourner ; seule la compilation release synthétique
+reste après la fabrication du MSI normal. Le contrôle PE reste bloquant mais
+n'affiche que le subsystem pertinent : son dump complet avait produit plus
+de 40 Mo de logs. Nouvelle validation native nécessaire. Compteur **0/2**.
