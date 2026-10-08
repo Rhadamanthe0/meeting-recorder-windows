@@ -42,7 +42,7 @@ examinés ; cela ne constitue pas une revue exhaustive du C/C++ amont vendorié.
 | CLI | Rejet effectif des titres IPC trop longs et des nombres de locuteurs invalides. |
 | Banc audio complet des six fixtures | **5/6 réussies** avec les modèles par défaut et les seuils existants. Échec import : erreur de locuteur **0,078869**, maximum **0,05**. Tous les locuteurs sont retrouvés ; l'écart provient surtout de couverture temporelle manquante, dont une première intervention non détectée. Le seuil est conservé. |
 | Vérification de types isolée Windows GNU | Réussie pour capture, IPC, confinement des processus, export, widget conditionnel et source PCM du lecteur, avec leurs dépendances Windows. Ce contrôle utilise un petit harness avec des substituts de chemins/réglages et ne remplace pas la compilation de l'application GTK complète. |
-| Application Windows complète, commit db3ef2d | Sur VM GitHub : check, **82 tests ordinaires**, **84 tests ci-audio**, Clippy bloquant dans les deux configurations, release et subsystem GUI réussis. Le nouveau test de libération des I/O d'un client IPC lent réussit dans les deux suites. |
+| Application Windows complète, commit 799a6e8 | Sur VM GitHub : check, **83 tests ordinaires**, **85 tests ci-audio**, Clippy bloquant dans les deux configurations, release et subsystem GUI réussis. Les tests de libération des I/O d'un client IPC lent et de conversion FC/LFE réussissent dans les deux suites. |
 | Packaging Windows | Construction du MSI normal, installation par utilisateur, vérification des imports et de --help sans UCRT au PATH, FFmpeg embarqué et désinstallation réussis sur VM GitHub. |
 | Interface Windows synthétique | Marqueur de sécurité du binaire, pipe CI isolé et état idle vérifiés. Capture de la seule fenêtre de test inspectée : textes, champs, boutons et indicateurs visibles, aucun rendu vide ni problème de mise en page identifié. |
 
@@ -77,7 +77,7 @@ supprime le diagnostic Windows confirmé sans désactiver de contrôle.
   une correction validées ; aucun ajustement arbitraire des seuils ou du
   modèle n'a été appliqué pour obtenir un résultat vert.
 - Les contrôles Windows, le downmix, la simulation audio, le rendu GTK et
-  le packaging MSI réussissent sur `db3ef2d` dans le run `37803329704`.
+  le packaging MSI réussissent sur `799a6e8` dans le run `37808502722`.
   L'accès IPC entre deux comptes et la mise à jour d'une installation MSI
   existante n'ont pas été exercés.
 - Les captures et lectures WASAPI matérielles ne sont pas autorisées sur le
@@ -312,5 +312,61 @@ fermé dans les deux sens avant son retrait. La stéréo FL/FR garde sa conversi
 directe. Les six tests de conversion extraits, les 75 tests Linux, Clippy dans
 les deux configurations et les contrôles Windows croisés réussissent. PORTING
 est corrigé pour décrire les runners et les tests synthétiques actuels.
-Une nouvelle CI native et une nouvelle exécution complète du banc sont
-nécessaires sur ce nouvel état. Compteur **0/2**.
+La CI native `37808502722` réussit sur le commit `799a6e8` : **83 tests
+ordinaires**, **85 tests ci-audio**, Clippy dans les deux configurations,
+builds release, MSI, installation/désinstallation, GUI et IPC isolé.
+https://github.com/Rhadamanthe0/meeting-recorder-windows/actions/runs/37808502722.
+La capture de la fenêtre de ce run est inspectée visuellement et ne présente
+pas de problème de rendu identifié.
+
+Les six scénarios sont aussi exécutés intégralement avec le binaire Linux
+recompilé. Le banc obtient **5/6**, avec tous les scores inchangés : seul
+`import` reste à **0,078869047619** au lieu du maximum **0,05**. Les résultats
+et transcriptions sont conservés dans `/tmp/meeting-audit-bench/results-reprise.json`
+et `transcripts-reprise/`. Le graphique du signal et des probabilités est dans
+`/workspace/meeting-audit-artifacts/import-diagnostic.png`.
+
+La relecture couvre aussi les interactions import/manifestes/lecteur,
+édition/sauvegarde/Undo, statut IPC/fermeture des fenêtres, agents/actions,
+configuration et documentation. Un débordement supposé sur des horodatages
+extrêmes est écarté : le parseur rejette déjà les valeurs non représentables
+en microsecondes pour le lecteur. Aucun changement n'est conservé pour cette
+hypothèse. La modification distante de l'exemple PowerShell (`Read-Host`)
+est intégrée sans écraser les modifications locales ; sa syntaxe est vérifiée.
+
+La précision du modèle et les bornes de parole de la référence import restent
+à départager avec une annotation indépendante. Aucune correction validée
+ne permet actuellement de faire passer ce contrôle en conservant son sens.
+Les fixtures, seuils et tests existants restent actifs. Le travail demeure
+incomplet ; compteur **0/2**, aucun audit sans problème n'est compté.
+
+## Reprise des références temporelles du banc
+
+Le générateur utilisait la durée entière du WAV Piper comme durée de parole,
+y compris les fins presque silencieuses. Sur le PCM exact de `import/audio.ogg`,
+la plupart des derniers mots précèdent ces fins de plusieurs centaines de
+millisecondes. Le diagnostic indépendant utilise Wav2Vec2 base 960h FP32, dépôt
+`onnx-community/wav2vec2-base-960h-ONNX`, révision
+`729c1a6730fb549c20a1c73a3d3f96f11020225e`, graphe SHA-256
+`00b7cc69516c1ab63c429e63a2b543e4d42bb77441ec5b98ee935de175b00de1`,
+avec sa normalisation de moyenne/variance et ses logits CTC. Il confirme par
+exemple le dernier mot du premier intervenant vers 5,26 s, contre une fin de
+référence de 5,60 s. Les sorties CTC ne constituent pas la nouvelle référence.
+
+La correction emploie une règle acoustique de bord indépendante des sorties
+de Nemotron : fenêtres RMS de 10 ms, plancher relatif de 60 dB et plancher
+minimal d'un pas PCM 16 bits, marge conservatrice de 100 ms aux deux bords.
+Elle ne retire aucun silence interne et ne modifie ni les audio, ni les textes,
+ni les locuteurs, ni le score, ni le seuil de 5 %. Les références partagées
+call/call-speakers/import restent identiques. Les chevauchements sont conservés
+si l'autre voix occupe encore un bord. La première réponse courte de Ben reste
+comptée ; ses sons faibles sont conservés et seuls les derniers blocs sous le
+plancher et au-delà de la marge sont exclus. Ce diagnostic n'a nécessité aucun
+périphérique audio.
+
+Le générateur applique cette règle avant le mélange, tout en conservant les
+échantillons, la durée des clips et leurs positions. Cinq nouveaux tests
+couvrent les silences de bord, la voix faible, les pauses internes, la réponse
+courte, le rejet d'un clip silencieux et l'absence de décalage du clip suivant.
+Les 23 tests Python réussissent. Le banc complet est relancé ; compteur 0/2
+jusqu'à confirmation et relectures finales.

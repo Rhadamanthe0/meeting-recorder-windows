@@ -58,6 +58,24 @@ bench/generate.py ~/path/to/piper-voices
 
 A script line is `speaker|gap|text`, where the gap is the seconds after the previous line ends; a negative gap makes them talk at the same time. The generated files are committed, so running the bench does not need piper.
 
+Reference intervals describe speech, rather than the entire Piper WAV: the
+generator excludes only leading/trailing near-silence, using 10 ms RMS blocks
+60 dB below each clip's peak (never below one 16-bit PCM step), with 100 ms
+padding. Internal pauses, short replies, audio samples and clip placement are
+preserved. The padding also protects quiet phoneme endings. A silent or
+unrepresentable synthesized line stops generation instead of becoming a speech
+reference.
+
+The shared `call`, `call-speakers` and `import` references were corrected on
+8 October 2026, using their existing clean mixed `import/audio.ogg`, decoded
+by FFmpeg to mono 16 kHz float PCM, and the same boundary rule within each
+original interval. Overlapping speech is retained conservatively. Audio files,
+words, speakers, scoring and thresholds were not changed. Independently,
+Wav2Vec2 CTC confirmed the final words precede the near-silent tails; its output
+was diagnostic only and was not used to generate the reference intervals.
+The short `Ben: Yeah.` remains in the reference and contributes to errors when
+missed. See [audit evidence](../docs/AUDIT.md) for the model revision and results.
+
 ## Licenses
 
 The generated fixtures are CC0. AMI is © the AMI Consortium, [CC BY 4.0](https://groups.inf.ed.ac.uk/ami/corpus/license.shtml); its speaker annotations come from [pyannote/AMI-diarization-setup](https://github.com/pyannote/AMI-diarization-setup). Neither is stored in this repository: `--ami` downloads them to `bench/.cache/`.
