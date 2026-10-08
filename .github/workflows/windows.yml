@@ -310,6 +310,39 @@ jobs:
             Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
             throw "msiexec /i exit $($install.ExitCode)"
           }
+          # Diagnostic temporaire (non bloquant, ne throw jamais ici) : où
+          # atterrit l'install per-user quand le runner est SYSTEM (exit 0
+          # mais exe introuvable). Borné : profondeurs + budget 90 s.
+          try {
+            Write-Output "[ci] --- diag install per-user SYSTEM (debut, non bloquant) ---"
+            try { Get-Content -LiteralPath $log -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[msi-log] $_" } } catch { Write-Warning "[ci] lecture log impossible : $($_.Exception.Message)" }
+            foreach ($hive in @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*")) {
+              try {
+                Get-ItemProperty -Path $hive -ErrorAction SilentlyContinue | Where-Object { ($_.DisplayName -match 'MeetingRecorder') -or ($_.PSChildName -match 'MeetingRecorder') } | ForEach-Object { Write-Output ("[ci] uninstall: hive=" + $hive + " key=" + $_.PSChildName + " DisplayName=" + $_.DisplayName + " InstallLocation=" + $_.InstallLocation) }
+              } catch { Write-Warning "[ci] registre illisible ($hive) : $($_.Exception.Message)" }
+            }
+            $diagDirs = @()
+            if ($env:LOCALAPPDATA) { $diagDirs += (Join-Path $env:LOCALAPPDATA "Programs\MeetingRecorder") }
+            $diagDirs += (Join-Path $env:SystemRoot "System32\config\systemprofile\AppData\Local\Programs\MeetingRecorder")
+            try { Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $diagDirs += (Join-Path $_.FullName "AppData\Local\Programs\MeetingRecorder") } } catch { Write-Warning "[ci] enum C:\Users impossible : $($_.Exception.Message)" }
+            foreach ($d in ($diagDirs | Sort-Object -Unique)) {
+              try {
+                $exists = Test-Path -LiteralPath $d
+                Write-Output "[ci] dir: $d exists=$exists"
+                if ($exists) { Get-ChildItem -LiteralPath $d -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Output ("[ci] contenu: " + $_.FullName) } }
+              } catch { Write-Warning "[ci] listage impossible ($d) : $($_.Exception.Message)" }
+            }
+            $diagRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:LOCALAPPDATA, "C:\Users", (Join-Path $env:SystemRoot "System32\config\systemprofile"))
+            $diagClock = [System.Diagnostics.Stopwatch]::StartNew()
+            foreach ($r in ($diagRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object -Unique)) {
+              if ($diagClock.Elapsed.TotalSeconds -gt 90) { Write-Output "[ci] recherche exe stoppee (budget 90 s)"; break }
+              try {
+                Get-ChildItem -Path $r -Filter "meeting-recorder-windows.exe" -Recurse -Depth 6 -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Write-Output ("[ci] exe trouve: " + $_.FullName) }
+              } catch { Write-Warning "[ci] recherche impossible ($r) : $($_.Exception.Message)" }
+            }
+            $diagClock.Stop()
+            Write-Output "[ci] --- diag install per-user SYSTEM (fin) ---"
+          } catch { Write-Warning "[ci] diag inattendu : $($_.Exception.Message)" }
           # Localisation robuste (runner SYSTEM) : le journal msiexec dit ou
           # l'install per-user a atterri (INSTALLFOLDER) ; repli : ratissage
           # LOCALAPPDATA + C:\Users\* + profil SYSTEM. Fail-closed si zero ou
