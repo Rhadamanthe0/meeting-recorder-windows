@@ -1,7 +1,11 @@
 # Audit correctif du dépôt — 8 octobre 2026
 
-Compteur provisoire : **0/2**. Les dernières corrections nécessitent encore
-les deux relectures complètes sur le même état, avec validations réussies.
+Compteur final : **2/2**. L’état applicatif final est
+`bb834cf524cecbd362353cd2ead02cdfe5a3f5dc` : 906 fichiers suivis identiques
+entre le dépôt de travail et la branche publiée, hors cette note.
+Deux audits complets consécutifs sont réussis, sans problème confirmé,
+modification nécessaire ni échec de validation sur cet état. Seules les notes
+de suivi ont été modifiées entre ces passes et leur publication.
 
 ## Périmètre et préparation
 
@@ -61,7 +65,7 @@ par ligne exhaustive.
   de MSYS2 et PowerShell pour le compte de service, outils vérifiés par hash,
   fermeture des processus ciblée et tests GUI/MSI sur VM GitHub.
 
-## Validations réalisées avant les deux passes finales
+## Validations de l’état final
 
 - Linux : fmt, check all-targets, Clippy all-targets bloquant normal et
   ci-audio, build release ; 80 tests applicatifs et un test d'intégration
@@ -78,9 +82,15 @@ par ligne exhaustive.
 - GTK Linux réel sous Xvfb : édition, suppression/Undo, renommage réussi et
   échecs de sauvegarde, retour à une nouvelle réunion, rendu à 820 × 560 ;
   quatre rendus clair/sombre standard et Omarchy inspectés.
-- Windows VM, ce2ad746, run 37819848984 : build, tests, analyse statique,
-  interface synthétique et installation/désinstallation MSI réussis.
-  La dernière modification CSS doit encore recevoir la même validation.
+- Windows VM, bb834cf, [run 37823206114](https://github.com/Rhadamanthe0/meeting-recorder-windows/actions/runs/37823206114)
+  et [run 37826043137](https://github.com/Rhadamanthe0/meeting-recorder-windows/actions/runs/37826043137) :
+  build, tests, Clippy dans les deux configurations, interface synthétique
+  et installation/désinstallation MSI réussis. 88 tests applicatifs et un
+  test d’intégration en mode normal ; 90 et un en mode synthétique.
+  Les deux captures de fenêtre ont été inspectées. L’exécutable installé démarre
+  avec `--help` sans les outils MSYS2 dans PATH ; FFmpeg embarqué démarre.
+  Ces runs manuels utilisent `hosted=true`. Les runs automatiques encore en
+  attente sur le runner personnel ne sont pas comptés comme réussis.
 - CLI et exemples : entrées invalides refusées avec un seul message utile,
   exemple Obsidian testé avec Unicode, guillemets et antislashs.
 
@@ -92,14 +102,42 @@ Ce modèle est diagnostique et ne change ni les références ni l’application.
 Les résultats, captures et scripts de diagnostic sont conservés dans
 /tmp/meeting-audit-* et les logs du workflow Windows. Une exécution du banc
 a été interrompue par le redémarrage de l'environnement ; elle n'est pas
-comptée comme réussie. Le premier téléchargement de modèle a échoué avec
+comptée comme réussie. Un contrôle GTK a rencontré une réinitialisation du
+serveur Xvfb entre deux fenêtres : compteur remis à zéro, harness externe
+stabilisé avec `-noreset`, puis quatre rendus et les parcours relancés avec
+succès. Aucun contrôle échoué n’est compté comme réussi.
+Le premier téléchargement de modèle a échoué avec
 UnknownIssuer : les modèles ont ensuite été téléchargés avec les certificats
 système approuvés et leurs hashes vérifiés ; TLS n'a pas été désactivé.
 
 ## Limites et suivi
 
-Aucun défaut confirmé restant après les corrections ci-dessus ; compteur
-encore à 0 tant que les deux audits complets ne sont pas terminés.
+Aucun défaut confirmé restant dans le périmètre revu ; compteur final **2/2**.
+Les empreintes SHA-256 des 906 fichiers hors cette note sont identiques avant
+et après les deux passes, dans le dépôt de travail et la branche publiée.
+
+| Audit final | Résultat sur le même état bb834cf |
+| --- | --- |
+| 1 — contrôles complete-2 | Huit points relus ; contrôles Rust/Python/sécurité/syntaxe/CLI, Piper et parcours GTK réussis ; banc 6/6 ; Windows build/GUI/MSI 37823206114 réussi. Aucune correction nécessaire. |
+| 2 — contrôles complete-3 | Huit points relus à nouveau, incluant les interactions ; contrôles locaux et parcours réels répétés avec succès ; banc 6/6 ; Windows build/GUI/MSI 37826043137 réussi. Aucune correction nécessaire. |
+
+Les deux passes finales couvrent les mêmes zones :
+
+| Point | Zones relues et contrôles associés |
+| --- | --- |
+| Fonctionnement | Capture/pause/arrêt/récupération, import, export, transcription, diarisation, sauvegardes et restaurations. |
+| Sécurité | Entrées, chemins, IPC privé, données des actions, agents sans outils, TLS, téléchargements et permissions CI. |
+| Qualité | Tous les modules maintenus, tests, exemples, parsers, ownership et callbacks ; check et Clippy. |
+| Architecture | Hub partagé, formats audio, chemins plateforme, manifestes/labels/langues, modes normal/synthétique, runtime MSI. |
+| Interface | Rendus clair/sombre standard/Omarchy, fenêtre réduite, nom long, édition/Undo, renommage et erreurs I/O réels. |
+| Performances et fiabilité | Epoch de capture, sérialisation des traitements lourds, annulation, cache de locuteurs, générations du lecteur, nettoyage et backpressure IPC. |
+| Tests et outillage | Rust dans les deux modes, Python, banc complet, RustSec, syntaxe, CLI, Piper, GUI et MSI natifs. |
+| Documentation | Installation source/MSI, utilisation, configuration, actions, CI, banc, démonstrations et provenance des correctifs vendoriés. |
+
+La seconde passe relit aussi les chaînes import → conversion → transcription
+→ sauvegarde → édition/chapitres, Hub → IPC et renommage → chargement du
+lecteur, avec les changements de réunion et les erreurs entre ces étapes.
+Elle ne consiste pas seulement à relancer les tests.
 
 Les tests ne capturent ni ne jouent de son sur le PC personnel : ci-audio
 utilise des sons en mémoire et un lecteur silencieux, un pipe et des données
