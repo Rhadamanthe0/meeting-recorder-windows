@@ -370,3 +370,36 @@ couvrent les silences de bord, la voix faible, les pauses internes, la réponse
 courte, le rejet d'un clip silencieux et l'absence de décalage du clip suivant.
 Les 23 tests Python réussissent. Le banc complet est relancé ; compteur 0/2
 jusqu'à confirmation et relectures finales.
+
+Le banc complet après correction des références réussit les **6/6 cas**,
+avec les modèles par défaut : import **0,04964176049**, limite **0,05**
+inchangée. Les métriques textuelles restent identiques. Résultat réellement
+exécuté : `/tmp/meeting-audit-bench/results-reference.json`. Ce succès corrige
+la référence de silence, pas l'omission de la première réponse courte par le
+modèle, qui reste une erreur mesurée dans le score accepté. Aucun test ou
+contrôle n'a été supprimé.
+
+La relecture trouve aussi l'appel à un exécutable `piper-tts` inexistant dans
+le paquet officiel : il fournit `piper`. Le générateur utilise désormais
+`sys.executable -m piper`, pour prendre le paquet de son propre environnement.
+Installation isolée de piper-tts 1.8.0, aide CLI et synthèse réelle avec Joe
+(ONNX/config vérifiés à la révision c10ece1aade47bb51c153c893d14e5bf8e5b7117)
+réussies, exclusivement vers un WAV. Aucun périphérique de sortie ouvert.
+
+Enfin, après déplacement d'un dossier lors d'un renommage, un échec de lecture
+du transcript, d'écriture du titre ou de sauvegarde du manifeste laissait
+le dossier sous le nouveau nom. La restauration ramène maintenant le dossier,
+le chemin du lecteur et l'état de la page au chemin précédent. Si ce nom est
+occupé, il est conservé et une erreur de restauration est signalée. Linux
+utilise RENAME_NOREPLACE pour refuser également une collision concurrente.
+Deux nouveaux tests vérifient les fichiers, le renommage limité à la casse et
+le refus d'un ancien nom occupé. Les **77 tests Linux** et les deux Clippy
+all-targets réussissent ; le build release réussit.
+
+Parcours GTK réel sous Xvfb : l'ancien binaire reproduit le dossier déplacé
+malgré l'échec ; le nouveau restaure le dossier. Le rendu montre un seul
+message utile. Un renommage réussi conserve la cohérence dossier/manifeste/
+titre du transcript ; une collision du manifeste et un dossier non inscriptible
+provoquent tous deux la restauration attendue, sans perte du contenu.
+Images et script de parcours : `/tmp/meeting-audit-title-gui/`. Compteur 0/2
+après ces corrections ; nouvelle CI et deux relectures finales nécessaires.

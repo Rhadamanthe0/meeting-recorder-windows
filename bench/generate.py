@@ -64,7 +64,7 @@ def speech_bounds(samples: list[float], rate: int = RATE) -> tuple[int, int]:
 
 def synth(voices: Path, voice: str, text: str, tmp: Path) -> list[float]:
     out = tmp / "line.wav"
-    subprocess.run(["piper-tts", "--model", str(voices / f"{voice}.onnx"), "--output_file", str(out)],
+    subprocess.run([sys.executable, "-m", "piper", "--model", str(voices / f"{voice}.onnx"), "--output_file", str(out)],
                    input=text.encode(), check=True, capture_output=True)
     with wave.open(str(out)) as w:
         assert w.getframerate() == RATE, voice

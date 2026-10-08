@@ -3571,13 +3571,18 @@ impl Recorder {
             self.render();
         }
         // The folder the meeting is in now: renamed, or the numbered one it had.
-        let target = if renamed { target } else { current };
+        let target = if renamed { target } else { current.clone() };
         let transcript = target.join("transcript.md");
         let text = match std::fs::read_to_string(&transcript) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => {
-                self.toast("Could not read the transcript; title was not saved");
+                let message = if self.restore_title_folder(&current, &target, renamed) {
+                    "Could not read the transcript; title was not saved"
+                } else {
+                    "Title could not be saved or restored; check the meeting files"
+                };
+                self.toast(message);
                 return;
             }
         };
@@ -3588,18 +3593,25 @@ impl Recorder {
             let body = rest.split_once('\n').map(|(_, body)| body).unwrap_or("");
             if meeting::atomic_write(&transcript, format!("# {title}\n{body}").as_bytes()).is_err()
             {
-                self.toast("Could not save the title");
+                let message = if self.restore_title_folder(&current, &target, renamed) {
+                    "Could not save the title"
+                } else {
+                    "Title could not be saved or restored; check the meeting files"
+                };
+                self.toast(message);
                 return;
             }
             heading_changed = true;
         }
         manifest.title = title;
         if meeting::write(&target, &manifest).is_err() {
-            if heading_changed
+            let heading_failed = heading_changed
                 && text.as_deref().is_some_and(|text| {
                     meeting::atomic_write(&transcript, text.as_bytes()).is_err()
-                })
-            {
+                });
+            // Attempt both restorations even when restoring the heading fails.
+            let folder_restored = self.restore_title_folder(&current, &target, renamed);
+            if heading_failed || !folder_restored {
                 self.toast("Title could not be saved or restored; check the meeting files");
             } else {
                 self.toast("Could not save the title");
@@ -3612,6 +3624,24 @@ impl Recorder {
                 .set(self.transcript_rev.get().wrapping_add(1));
         }
         self.toast("Saved");
+    }
+
+    fn restore_title_folder(
+        &self,
+        current: &std::path::Path,
+        target: &std::path::Path,
+        renamed: bool,
+    ) -> bool {
+        if !renamed {
+            return true;
+        }
+        if rollback_folder_rename(current, target).is_err() {
+            return false;
+        }
+        *self.result_dir.borrow_mut() = Some(current.to_path_buf());
+        self.player.load(current);
+        self.render();
+        true
     }
 
     fn close_when_done(&self) {
@@ -3737,6 +3767,50 @@ fn is_case_only_rename(current: &std::path::Path, target: &std::path::Path) -> b
             .as_os_str()
             .as_encoded_bytes()
             .eq_ignore_ascii_case(target.as_os_str().as_encoded_bytes())
+}
+
+fn rollback_folder_rename(
+    current: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    // Another window/process may have claimed the old name meanwhile. Never
+    // replace that folder; keep the current result path and report the failure.
+    if current.exists()
+        && !matches!(
+            (current.canonicalize(), target.canonicalize()),
+            (Ok(current), Ok(target)) if current == target
+        )
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "the previous meeting folder name is now occupied",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let from = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+        let to = std::ffi::CString::new(current.as_os_str().as_bytes())?;
+        // SAFETY: both paths remain NUL-terminated and alive for the call.
+        // NOREPLACE also protects a name claimed after the existence check.
+        if unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::fs::rename(target, current)
+    }
 }
 
 fn output_dir(started_at: i64, title: &str) -> PathBuf {
@@ -4422,6 +4496,66 @@ fn meter_block(name: &str, meter: &gtk::DrawingArea) -> gtk::Box {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn title_test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "meeting-recorder-title-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn failed_title_save_can_restore_the_folder_and_its_files() {
+        let base = title_test_dir("restore");
+        for (before, after) in [("original", "renamed"), ("Weekly", "weekly")] {
+            let current = base.join(before);
+            let target = base.join(after);
+            std::fs::create_dir(&current).unwrap();
+            std::fs::write(current.join("transcript.md"), "original transcript").unwrap();
+            std::fs::rename(&current, &target).unwrap();
+            rollback_folder_rename(&current, &target).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(current.join("transcript.md")).unwrap(),
+                "original transcript"
+            );
+            // Windows finds both spellings; check the stored name instead.
+            assert!(
+                std::fs::read_dir(&base)
+                    .unwrap()
+                    .any(|e| { e.unwrap().file_name() == std::ffi::OsStr::new(before) })
+            );
+            std::fs::remove_dir_all(current).unwrap();
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn restoring_a_title_does_not_replace_an_occupied_original_name() {
+        let base = title_test_dir("occupied");
+        let current = base.join("original");
+        let target = base.join("renamed");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("transcript.md"), "meeting transcript").unwrap();
+        std::fs::create_dir(&current).unwrap();
+        assert_eq!(
+            rollback_folder_rename(&current, &target)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(current.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(target.join("transcript.md")).unwrap(),
+            "meeting transcript"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn case_only_rename_is_the_same_folder() {

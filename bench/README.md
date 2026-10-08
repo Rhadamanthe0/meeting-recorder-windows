@@ -52,6 +52,11 @@ The automated checks run `bench/tests.py` in CI via `.github/workflows/windows.y
 
 The fixtures are generated from the scripts in `scripts/`, meetings of a small team working on Omarchy, with [piper](https://github.com/OHF-Voice/piper1-gpl) voices that are in the public domain or CC0 (Joe, John, Kristin, Norman and Cori from [piper-voices](https://huggingface.co/rhasspy/piper-voices)):
 
+Install `piper-tts` in the Python environment used to run the generator, put
+FFmpeg on PATH, and download both the `.onnx` and `.onnx.json` files for each
+voice into the voices directory. The generator invokes `python -m piper` and
+writes WAV files; it does not play audio.
+
 ```bash
 bench/generate.py ~/path/to/piper-voices
 ```
