@@ -131,7 +131,6 @@ fn main() -> glib::ExitCode {
             println!();
             println!("  (no command)  open the recorder, ready to record");
             println!("  <meeting>     open a .meeting-recorder file or a meeting folder");
-            println!("  new-window    open another recorder window");
             println!("  transcribe-file <audio> [--speakers N] [--language xx] [--model name]");
             println!("  diarize <audio> [--speakers N]   print speaker turns as JSON");
             println!("  start [name]  start recording, opening the recorder if needed");

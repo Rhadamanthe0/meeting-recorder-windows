@@ -251,3 +251,27 @@ n'est disponible à ce stade. Une option de dispatch `hosted=true` permet
 maintenant d'exécuter exactement le même build sur une VM Windows GitHub,
 dans un groupe de concurrence distinct. Elle ne change pas le runner des
 push/PR internes habituels et ne modifie pas la configuration du PC.
+
+La CI sur VM `37799865905` (`14500f8`) réussit complètement : hôtes GNU
+effectifs, check, **81 tests Windows ordinaires**, Clippy bloquant,
+**83 tests ci-audio**, Clippy ci-audio, release portable, subsystem GUI,
+MSI normal, compilation release synthétique, rendu/IPC synthétiques et
+installation/désinstallation du MSI sans UCRT au PATH. Les tests d'entrée
+synthétique et de décodage vers une sortie silencieuse ont effectivement
+tourné et réussi. Le contrôle du downmix quad/surround réussit aussi.
+Le téléchargement de l'image est refusé par le proxy de l'environnement
+d'audit (HTTP 403), même après récupération via le connecteur GitHub.
+Le script joint donc maintenant une copie bornée de la fenêtre de test
+dans ses logs ; l'artefact PNG demeure conservé.
+
+La relecture trouve un doublon `new-window` dans `--help` : une seule ligne
+est conservée avec l'information Ctrl+N. Le binaire Linux recompilé confirme
+ce résultat. Elle confirme aussi qu'une file de statut pleine retirait son
+sender sans interrompre les I/O synchrones Windows ; un client connecté qui
+ne lit plus pouvait donc conserver des threads et des handles indéfiniment.
+Un handle de serveur par client permet maintenant de déconnecter cette
+instance quand elle est retirée. Le nouveau test garde le handle du pair
+ouvert et sans lecture, puis exige la fin des deux workers après retrait.
+Check et Clippy Windows croisés, check/Clippy Linux, les 74 tests Rust Linux
+et les 18 tests Python réussissent. Nouvelle CI native nécessaire sur ce
+dernier état ; compteur **0/2**, banc import encore en échec.

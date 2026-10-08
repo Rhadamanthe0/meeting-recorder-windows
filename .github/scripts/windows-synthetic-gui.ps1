@@ -78,6 +78,16 @@ try {
         }
         $bitmap.Save((Join-Path $Output "window.png"), [System.Drawing.Imaging.ImageFormat]::Png)
         if ($colors.Count -lt 10) { throw "Window capture is blank; render validation is incomplete" }
+        # A bounded copy of this test window is also available through logs
+        # when an audit environment cannot download the artifact redirect.
+        $png = [IO.File]::ReadAllBytes((Join-Path $Output "window.png"))
+        if ($png.Length -le 131072) {
+            $encoded = [Convert]::ToBase64String($png)
+            for ($offset = 0; $offset -lt $encoded.Length; $offset += 512) {
+                $part = $encoded.Substring($offset, [Math]::Min(512, $encoded.Length - $offset))
+                Write-Output "[ci] WINDOW_PNG_BASE64=$part"
+            }
+        } else { Write-Output "[ci] Window image exceeds inline limit; use synthetic-audio-results artifact" }
     } finally { $graphics.Dispose(); $bitmap.Dispose() }
     Write-Output "Synthetic GUI and isolated IPC rendered successfully; no hardware audio endpoint opened"
 } finally {

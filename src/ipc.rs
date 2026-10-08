@@ -323,6 +323,27 @@ fn private_pipe_security()
     }
 }
 
+/// Retains a server handle so dropping a slow client cancels its blocked I/O.
+#[cfg(target_os = "windows")]
+struct PipeClient {
+    sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+    connection: interprocess::local_socket::Stream,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for PipeClient {
+    fn drop(&mut self) {
+        use interprocess::local_socket::Stream;
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+        use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
+        let Stream::NamedPipe(stream) = &self.connection;
+        // SAFETY: this owns a live server-side handle for this client only.
+        // Unread status is deliberately discarded when its queue is full.
+        // Disconnecting also wakes the blocked reading/writing clones.
+        unsafe { DisconnectNamedPipe(stream.as_handle().as_raw_handle()) };
+    }
+}
+
 /// Starts the pipe server. Called once, from the primary instance. Clients
 /// get the state lines of the busiest window; a line a client writes that
 /// names one of `COMMANDS` is passed on to `commands`.
@@ -349,11 +370,14 @@ pub fn serve(
             return;
         }
     };
-    let clients: Arc<Mutex<Vec<std::sync::mpsc::SyncSender<Vec<u8>>>>> = Arc::default();
+    let clients: Arc<Mutex<Vec<PipeClient>>> = Arc::default();
 
     let accepted = clients.clone();
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            let Ok(connection) = stream.try_clone() else {
+                continue;
+            };
             if let Ok(reader) = stream.try_clone() {
                 let commands = commands.clone();
                 thread::spawn(move || read_commands(reader, &commands));
@@ -369,7 +393,10 @@ pub fn serve(
                     }
                 }
             });
-            accepted.lock().unwrap().push(tx);
+            accepted.lock().unwrap().push(PipeClient {
+                sender: tx,
+                connection,
+            });
         }
     });
 
@@ -395,13 +422,13 @@ pub fn serve(
             .to_string()
                 + "\n";
             // Un client qui ne suit pas est abandonné au lieu d'être attendu :
-            // `try_send` échoue dès que son canal borné est plein (~20 ms
-            // de lignes), comme le timeout d'écriture côté Linux.
+            // `try_send` échoue dès que ses quatre emplacements sont occupés.
+            // La déconnexion libère aussi les threads d'I/O de ce client.
             let bytes = line.into_bytes();
             clients
                 .lock()
                 .unwrap()
-                .retain(|client| client.try_send(bytes.clone()).is_ok());
+                .retain(|client| client.sender.try_send(bytes.clone()).is_ok());
             thread::sleep(Duration::from_millis(if recording {
                 50
             } else if busy {
@@ -503,6 +530,52 @@ mod tests {
         read_commands(b"start Weekly\npause\n".as_slice(), &tx);
         assert_eq!(rx.try_recv().unwrap(), ("start", "Weekly".into()));
         assert_eq!(rx.try_recv().unwrap(), ("pause", String::new()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn removing_a_slow_pipe_client_releases_its_blocked_io() {
+        use interprocess::TryClone;
+        use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream, prelude::*};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        let name = format!("{PIPE_NAME}-slow-test-{}", std::process::id())
+            .to_ns_name::<GenericNamespaced>()
+            .unwrap()
+            .into_owned();
+        let listener = ListenerOptions::new()
+            .name(name.clone())
+            .security_descriptor(private_pipe_security().unwrap())
+            .create_sync()
+            .unwrap();
+        let peer = Stream::connect(name).unwrap();
+        let mut writer = listener.accept().unwrap();
+        let mut reader = writer.try_clone().unwrap();
+        let connection = writer.try_clone().unwrap();
+        let (sender, lines) = std::sync::mpsc::sync_channel(4);
+        let client = PipeClient { sender, connection };
+        let (finished, results) = std::sync::mpsc::channel();
+        let reading = finished.clone();
+        let reader = thread::spawn(move || {
+            let failed = reader.read_exact(&mut [0]).is_err();
+            reading.send(failed).unwrap();
+        });
+        let writer = thread::spawn(move || {
+            let line = lines.recv().unwrap();
+            let failed = writer.write_all(&line).is_err();
+            finished.send(failed).unwrap();
+        });
+        client.sender.send(vec![0; 16 * 1024 * 1024]).unwrap();
+        // Removing a sender alone cannot wake a synchronous pipe write/read.
+        thread::sleep(Duration::from_millis(100));
+        assert!(results.try_recv().is_err(), "fixture did not block I/O");
+        drop(client);
+        for _ in 0..2 {
+            assert!(results.recv_timeout(Duration::from_secs(5)).unwrap());
+        }
+        reader.join().unwrap();
+        writer.join().unwrap();
+        // The peer keeps its handle open and never reads until both workers exit.
+        drop(peer);
     }
 
     fn status(state: &'static str, title: &str) -> SharedStatus {
