@@ -43,6 +43,10 @@ par ligne exhaustive.
   retirant seulement le silence de bord des clips. Audio, paroles, locuteurs,
   chevauchements, modèles, métriques et seuils conservés. La réponse très
   faible de Ben reste comptée comme manquante. Tests de la règle ajoutés.
+- Mise en page : un nom de locuteur long imposait une largeur de 1034 pixels
+  et réduisait le texte à quelques caractères par ligne. Colonne bornée et
+  nom ellipsé avec infobulle complète ; rendu réel vérifié à 820 × 560,
+  sans modification du transcript ni du manifeste.
 - Accessibilité : noms de locuteurs rapprochés de la couleur du texte tout
   en conservant des teintes distinctes, dans les styles standard et Omarchy.
   Le rendu réel des six couleurs en clair/sombre, y compris la ligne

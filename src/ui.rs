@@ -2687,13 +2687,14 @@ impl Recorder {
         for note in &notes {
             self.transcript_list.append(&note_row(note));
         }
-        // The speaker column is as wide as the longest name.
+        // Keep names aligned without letting a long name crowd out the transcript.
         let speaker_width = paragraphs
             .list
             .iter()
             .map(|p| text_width(&self.transcript_list, &p.speaker))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(144);
         let long = paragraphs
             .list
             .last()
@@ -2977,6 +2978,9 @@ impl Recorder {
             .build();
         let speaker = gtk::Label::builder()
             .label(&paragraph.speaker)
+            .tooltip_text(&paragraph.speaker)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .max_width_chars(18)
             .xalign(0.0)
             .valign(gtk::Align::Start)
             .width_request(speaker_width)
