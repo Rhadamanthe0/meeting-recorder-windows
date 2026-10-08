@@ -40,6 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Prépare PowerShell pour le service Windows
+        shell: powershell
+        run: ./.github/scripts/setup-powershell.ps1
+
       # Dispatch manuel : le tag doit exister sur origin, sinon échec.
       # Publier un MSI `X.Y.Z` depuis master quand `vX.Y.Z` n'existe pas est
       # interdit : la chaîne est tag existant -> checkout exact -> version

@@ -37,14 +37,15 @@ Les tests spécifiques vérifient l'écriture de samples non nuls, la suspension
 des écritures pendant une pause, la reprise et la libération de l'entrée ;
 ils vérifient aussi le décodage et la fin d'une lecture sans sortie matérielle.
 
-Le test GUI n'exécute que le binaire synthétique après vérification de sa
+Le job `verify-gui` s'exécute sur une VM GitHub Windows jetable, car le runner
+du PC fonctionne comme service sans bureau interactif. Il reçoit le runtime
+synthétique construit par le runner. Le test GUI n'exécute que ce binaire après vérification de sa
 version. Il vérifie son pipe isolé et capture seulement sa fenêtre via
 `PrintWindow`, jamais l'écran complet. Il n'envoie aucune touche ni aucun clic
 global au bureau. Ses journaux, état IPC et image figurent dans l'artefact
 `synthetic-audio-results`.
 
-Si la session du runner ne permet pas le rendu d'une fenêtre (par exemple un
-service Windows sans bureau utilisable), ce contrôle échoue explicitement.
+Si la VM ne permet pas le rendu d'une fenêtre, ce contrôle échoue explicitement.
 La simulation ne valide pas les échanges WASAPI avec un pilote, les changements
 de périphérique ou la qualité acoustique réelle. Ces contrôles restent distincts.
 L'échec connu du banc de diarisation `import` n'est pas corrigé par ce mode.

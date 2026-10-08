@@ -29,6 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Prépare PowerShell pour le service Windows
+        shell: powershell
+        run: ./.github/scripts/setup-powershell.ps1
+
       # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
       # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
       # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
@@ -222,6 +226,7 @@ jobs:
       # Diagnostic ggml manquant : affiche les OUT_DIR et libs statiques réellement produits.
       - name: Diagnostic libs statiques
         if: always()
+        shell: powershell
         run: |
           Write-Output "[ci] OUT_DIR whisper-rs-sys :"
           Get-ChildItem -Path "target/debug/build" -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ("[ci] out: " + $_.FullName) }
@@ -307,24 +312,22 @@ jobs:
             }
           } finally { $probe.Dispose() }
 
-      # A failed rendering check is reported. An interactive session is needed
-      # on a self-hosted PC; the process always uses generated inputs.
-      - name: Smoke GUI synthétique et IPC isolé
+      # Le service Windows n'a pas de bureau interactif. Seul le runtime
+      # synthétique est transmis à une VM GitHub pour vérifier le rendu.
+      - name: Prépare le runtime GUI synthétique
         run: |
-          $testStage = Join-Path $env:RUNNER_TEMP ("meeting-recorder-synthetic-" + [Guid]::NewGuid().ToString("N"))
+          $testStage = Join-Path $env:GITHUB_WORKSPACE "synthetic-runtime"
           New-Item -ItemType Directory -Path $testStage | Out-Null
           Copy-Item packaging/windows/stage/* $testStage -Recurse
           Copy-Item target/release/meeting-recorder-windows.exe (Join-Path $testStage "meeting-recorder-windows.exe") -Force
-          & .github/scripts/windows-synthetic-gui.ps1 -Exe (Join-Path $testStage "meeting-recorder-windows.exe")
 
-      - name: Upload résultats synthétiques (fenêtre de test uniquement)
-        if: always()
+      - name: Upload runtime synthétique
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: synthetic-audio-results
-          if-no-files-found: warn
+          name: synthetic-runtime
+          if-no-files-found: error
           retention-days: 7
-          path: synthetic-audio-results/
+          path: synthetic-runtime/
 
       - name: Upload msi-stage (diagnostic closure)
         if: always()
@@ -342,6 +345,30 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: packaging/windows/*.msi
+
+  verify-gui:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download runtime synthétique
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: synthetic-runtime
+          path: synthetic-runtime
+      - name: Smoke GUI synthétique et IPC isolé
+        run: ./.github/scripts/windows-synthetic-gui.ps1 -Exe synthetic-runtime/meeting-recorder-windows.exe
+      - name: Upload résultats synthétiques (fenêtre de test uniquement)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-audio-results
+          if-no-files-found: warn
+          retention-days: 7
+          path: synthetic-audio-results/
 
   verify-msi:
     needs: build

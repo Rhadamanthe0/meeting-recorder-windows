@@ -166,3 +166,13 @@ avec succès ; le contrôle de types et Clippy Windows isolés réussissent.
 Le test de lecture synthétique couvre aussi le décodeur de repli Rodio, et
 Clippy devient bloquant dans le workflow normal et dans la variante ci-audio.
 La nouvelle validation native reste à exécuter. Compteur : **0/2**.
+
+Le run `37784836247` (commit `d13a490`) est incomplet : le service Windows
+ne trouve pas `pwsh` dans son PATH avant les validations. Le propriétaire
+confirme que le runner fonctionne comme service. Le workflow prépare maintenant
+PowerShell depuis Windows PowerShell 5.1, réutilise son installation si présente
+ou fournit une archive officielle portable avec taille/digest vérifiés. Le rendu
+et le pipe GUI sont déplacés dans `verify-gui` sur une VM Windows GitHub ;
+le runner personnel ne lance jamais l’interface. YAML, séparation des jobs,
+41 blocs/scripts PowerShell et `git diff --check` réussissent localement.
+La nouvelle validation native reste à obtenir ; compteur **0/2**.
