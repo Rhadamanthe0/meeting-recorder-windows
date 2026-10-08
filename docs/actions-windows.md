@@ -119,10 +119,14 @@ command = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"(Get-Content
 Same run as the done page, printing the outcome. The MSI adds neither PATH
 nor App Paths, so use the installed full path:
 
-In PowerShell:
+In PowerShell: enter the values as data, never paste the path inside a `"..."`
+string (PowerShell would run any `$(...)` it contains, and meeting file names
+may hold `$`, parentheses, spaces, `;` and quotes):
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\MeetingRecorder\meeting-recorder-windows.exe" action "<name>" "<meeting folder or .meeting-recorder file>"
+$ActionName = Read-Host 'Action name'
+$MeetingPath = Read-Host 'Meeting folder or .meeting-recorder file'
+& "$env:LOCALAPPDATA\Programs\MeetingRecorder\meeting-recorder-windows.exe" action $ActionName $MeetingPath
 ```
 
 In cmd.exe:
