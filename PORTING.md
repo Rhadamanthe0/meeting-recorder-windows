@@ -31,7 +31,8 @@ diarisation Nemotron ONNX, résumé via LM Studio/Ollama OpenAI-compatible).
   construit en CI, publié en release ; `MeetingRecorder-<version>.msi`,
   double-clic sans admin) + voie source avancée (Rust GNU, MSYS2 UCRT64,
   ffmpeg, `cargo build --release`), `.github/workflows/windows.yml`
-  (CI `windows-latest`), `.gitignore` complété.
+  (build sur runner Windows personnel, VM GitHub en repli manuel et pour les
+  PR de forks ; vérifications GUI/MSI sur VM GitHub), `.gitignore` complété.
 
 Écart de nommage connu (réel, cf. `src/main.rs:27`) : le binaire Cargo est
 `meeting-recorder-windows`, mais `APP_NAME` vaut encore
@@ -41,8 +42,11 @@ et les messages d'aide gardent l'ancien nom. La doc suit le réel.
 ## Reste (hors V1)
 
 1. Icône tray Windows.
-2. Tests audio réels (matériel WASAPI) ; seuls les tests unitaires/logiques existent.
-3. Build GTK validé par CI (runs Success du 2026-09-27).
+2. Tests audio réels (matériel WASAPI). La CI couvre la capture de tons
+   synthétiques et le décodage vers une sortie silencieuse, sans pilote audio.
+
+Le build GTK et les contrôles GUI/MSI sont validés par la CI Windows du
+8 octobre 2026 ; voir [les tests sans périphériques réels](docs/ci-audio-windows.md).
 
 ## Limites connues
 

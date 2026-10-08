@@ -156,10 +156,7 @@ pub fn serve(
             clients
                 .lock()
                 .unwrap()
-                .retain_mut(|client| match client.write_all(line.as_bytes()) {
-                    Ok(()) => true,
-                    Err(e) => e.kind() == ErrorKind::Interrupted,
-                });
+                .retain_mut(|client| send_status(client, line.as_bytes()));
             thread::sleep(Duration::from_millis(if recording {
                 50
             } else if busy {
@@ -169,6 +166,20 @@ pub fn serve(
             }));
         }
     });
+}
+
+#[cfg(target_os = "linux")]
+fn send_status(client: &mut UnixStream, line: &[u8]) -> bool {
+    match client.write_all(line) {
+        Ok(()) => true,
+        Err(e) if e.kind() == ErrorKind::Interrupted => true,
+        Err(_) => {
+            // Dropping the writer alone leaves read_commands blocked on its
+            // clone. Shut down the connection before removing this client.
+            let _ = client.shutdown(std::net::Shutdown::Both);
+            false
+        }
+    }
 }
 
 fn read_commands(stream: impl Read, commands: &async_channel::Sender<Command>) {
@@ -489,6 +500,27 @@ pub fn watch() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn removing_a_slow_socket_client_releases_its_blocked_reader() {
+        let (mut server, peer) = UnixStream::pair().unwrap();
+        server
+            .set_write_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut reading = server.try_clone().unwrap();
+        let (finished, result) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            let ended = reading.read_exact(&mut [0]).is_err();
+            let _ = finished.send(ended);
+        });
+        assert!(!send_status(&mut server, &vec![0; 16 * 1024 * 1024]));
+        drop(server);
+        assert!(result.recv_timeout(Duration::from_secs(5)).unwrap());
+        reader.join().unwrap();
+        // A clone must finish even while the peer keeps the connection open.
+        drop(peer);
+    }
 
     #[test]
     #[cfg(windows)]

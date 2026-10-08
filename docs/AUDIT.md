@@ -2,8 +2,8 @@
 
 Travail incomplet. Compteur d'audits complets consécutifs sans problème : **0/2**.
 Les corrections et les validations en échec ont remis le compteur à zéro.
-Aucune passe n'est comptée comme complète tant que les contrôles Windows
-nécessaires restent impossibles et que le banc audio reste en échec.
+Les contrôles Windows sur VM sont désormais réussis. Aucune passe n'est
+comptée comme complète tant que le banc audio reste en échec.
 
 Le dépôt était propre au départ. Aucun fichier AGENTS.md ou CLAUDE.md n'a été
 trouvé. README, PORTING, documentation des actions, du banc et des démos,
@@ -20,7 +20,7 @@ examinés ; cela ne constitue pas une revue exhaustive du C/C++ amont vendorié.
 | Audio et données | Erreurs d'écriture perdues à l'arrêt et erreurs de synchronisation d'un ancien enregistrement : lecture sous le même verrou et identification de l'enregistrement. Fermeture du fichier temporaire avant nettoyage sous Windows. Protection des manifestes lors d'un renommage limité à la casse ou d'un échec de suppression. |
 | Sécurité | WASAPI 0.24 concerné par RUSTSEC-2026-0332 remplacé par 0.25. Trames IPC tronquées refusées ; titres trop longs refusés par la CLI. Permissions du pipe Windows restreintes au propriétaire et à LocalSystem. Messages non interprétés comme du markup. |
 | Interactions UI | Vérification de l'état après les dialogues d'import ; sauvegarde avant modification de l'état ; rejet des résultats asynchrones d'une autre réunion ou révision ; restauration des textes lors d'échecs de sauvegarde. Actions de paragraphe visibles au clavier et colonne d'actions défilable sur les écrans bas. |
-| Ressources et délais | Références faibles des callbacks du lecteur pour libérer les réunions fermées. Job Objects pour les outils audio Windows, incluant lecture, import, export, décodage, sondes et formes d’onde. Sondes d'agents limitées en temps et en taille ; arrêt des descendants avant d'attendre l'envoi du texte. |
+| Ressources et délais | Références faibles des callbacks du lecteur pour libérer les réunions fermées. Déconnexion des clients IPC Windows qui ne lisent plus, pour libérer les workers et handles bloqués. Job Objects pour les outils audio Windows, incluant lecture, import, export, décodage, sondes et formes d’onde. Sondes d'agents limitées en temps et en taille ; arrêt des descendants avant d'attendre l'envoi du texte. |
 | Entrées et configuration | Horodatages et couleurs invalides sans panic ni débordement ; caractères de contrôle filtrés des noms. Lecture des paramètres racine avec guillemets, chemins Windows et caractères # préservés. Chemins des actions rendus absolus avant changement de répertoire. |
 | Outillage et documentation | Exemple compilable avec all-targets et corrections des diagnostics des contrôles existants. Échecs WiX bloquants, version MSI issue de Cargo, schémas GTK limités au processus. Suivi Cargo de GGML_NATIVE et des options CMake transmises, pour éviter un cache de compilation obsolète. Banc utilisant le vrai nom du binaire et refusant erreurs ou mesures absentes. Installation source et limites documentées corrigées. Notes Obsidian : échappement des noms en YAML et écriture UTF-8 explicite. |
 
@@ -31,17 +31,20 @@ examinés ; cela ne constitue pas une revue exhaustive du C/C++ amont vendorié.
 | cargo fmt --all -- --check | Réussi. |
 | cargo check --locked --all-targets | Réussi sur Linux. |
 | cargo clippy --locked --all-targets -- -D warnings | Réussi sur le code applicatif Linux ; six avertissements non bloquants proviennent du build script et des bindings de whisper-rs-sys. |
-| cargo test --locked | 74 tests réussis sur Linux, dont deux nouveaux tests de drainage des sorties et de fermeture des pipes conservés par un descendant. |
+| cargo test --locked | 75 tests réussis sur Linux, dont les tests de drainage des sorties et de fermeture des pipes conservés par un descendant ou un client qui ne lit plus. |
 | cargo build --locked ; build --release --locked avec GGML_NATIVE=OFF | Réussis sur Linux. |
 | python3 bench/tests.py | 18 tests réussis. |
-| cargo audit | 278 dépendances ; aucune vulnérabilité connue ni avertissement signalé par la base RustSec consultée le 7 octobre 2026. |
+| cargo audit | 278 dépendances ; aucune vulnérabilité connue ni avertissement signalé par la base RustSec actualisée le 8 octobre 2026. |
 | Cache C++ | Changement effectif de GGML_NATIVE détecté par Cargo ; build script relancé et contrôle de types réussi. |
-| Syntaxe des fichiers | 11 scripts Python, 4 workflows YAML, 9 JSON, 3 XML et 3 scripts shell validés. Analyse syntaxique PowerShell 7.6.6 de 39 scripts de packaging, CI et exemples README réussie ; pas d'exécution du packaging Windows. |
+| Syntaxe des fichiers | 11 scripts Python, 4 workflows YAML, 9 JSON, 3 XML et 3 scripts shell validés. Analyse syntaxique PowerShell 7.6.6 réussie, avec les scripts CI ajoutés et les gardes GNU. |
 | Interface GTK sous Xvfb | Ouverture d'une réunion synthétique, édition, suppression, Undo, retour à une nouvelle réunion et inspection du rendu. Vérification de la petite fenêtre après correction du défilement ; nouvelle ouverture après confinement des outils audio, durée détectée et actions accessibles à 820 × 560. Aucun test matériel WASAPI. |
 | Exemple Obsidian | Exécution isolée avec guillemets, antislashs et Unicode ; les propriétés YAML et le texte restent intacts. |
 | CLI | Rejet effectif des titres IPC trop longs et des nombres de locuteurs invalides. |
 | Banc audio complet des six fixtures | **5/6 réussies** avec les modèles par défaut et les seuils existants. Échec import : erreur de locuteur **0,078869**, maximum **0,05**. Tous les locuteurs sont retrouvés ; l'écart provient surtout de couverture temporelle manquante, dont une première intervention non détectée. Le seuil est conservé. |
 | Vérification de types isolée Windows GNU | Réussie pour capture, IPC, confinement des processus, export, widget conditionnel et source PCM du lecteur, avec leurs dépendances Windows. Ce contrôle utilise un petit harness avec des substituts de chemins/réglages et ne remplace pas la compilation de l'application GTK complète. |
+| Application Windows complète, commit db3ef2d | Sur VM GitHub : check, **82 tests ordinaires**, **84 tests ci-audio**, Clippy bloquant dans les deux configurations, release et subsystem GUI réussis. Le nouveau test de libération des I/O d'un client IPC lent réussit dans les deux suites. |
+| Packaging Windows | Construction du MSI normal, installation par utilisateur, vérification des imports et de --help sans UCRT au PATH, FFmpeg embarqué et désinstallation réussis sur VM GitHub. |
+| Interface Windows synthétique | Marqueur de sécurité du binaire, pipe CI isolé et état idle vérifiés. Capture de la seule fenêtre de test inspectée : textes, champs, boutons et indicateurs visibles, aucun rendu vide ni problème de mise en page identifié. |
 
 Le premier banc audio a échoué au téléchargement avec UnknownIssuer : le
 client TLS de l'application ne connaît pas le certificat du proxy de cette
@@ -73,11 +76,10 @@ supprime le diagnostic Windows confirmé sans désactiver de contrôle.
 - Résoudre l'échec de couverture de diarisation sur import avec une cause et
   une correction validées ; aucun ajustement arbitraire des seuils ou du
   modèle n'a été appliqué pour obtenir un résultat vert.
-- Le check, les 80 tests et le build release Windows ont réussi dans le run
-  `37776726518`, y compris les tests de confinement, de pipe privé et de
-  manifestes. Revalider sur l'état corrigé les contrôles devenus bloquants,
-  le nouveau downmix, la simulation audio, le rendu GTK et le packaging MSI.
-  L'accès IPC entre deux comptes et la mise à jour MSI restent à vérifier.
+- Les contrôles Windows, le downmix, la simulation audio, le rendu GTK et
+  le packaging MSI réussissent sur `db3ef2d` dans le run `37803329704`.
+  L'accès IPC entre deux comptes et la mise à jour d'une installation MSI
+  existante n'ont pas été exercés.
 - Les captures et lectures WASAPI matérielles ne sont pas autorisées sur le
   PC personnel ; la simulation ne valide pas les pilotes ni le hotplug.
 - L'intégration Quickshell/Omarchy, Vulkan et les sources C/C++ amont n'ont pas
@@ -85,7 +87,7 @@ supprime le diagnostic Windows confirmé sans désactiver de contrôle.
 - Après ces contrôles et corrections, reprendre deux audits complets sans
   modification sur le même état, avec une seconde relecture des interactions.
 
-## Reprise nécessaire sur Windows
+## Historique de la reprise Windows
 
 Utiliser les corrections présentes dans le répertoire de travail, et non un
 ancien commit. Le workflow `.github/workflows/windows.yml` prépare Rust GNU,
@@ -273,5 +275,42 @@ Un handle de serveur par client permet maintenant de déconnecter cette
 instance quand elle est retirée. Le nouveau test garde le handle du pair
 ouvert et sans lecture, puis exige la fin des deux workers après retrait.
 Check et Clippy Windows croisés, check/Clippy Linux, les 74 tests Rust Linux
-et les 18 tests Python réussissent. Nouvelle CI native nécessaire sur ce
-dernier état ; compteur **0/2**, banc import encore en échec.
+et les 18 tests Python réussissent.
+
+La CI native finale `37803329704` sur `db3ef2d` réussit entièrement :
+https://github.com/Rhadamanthe0/meeting-recorder-windows/actions/runs/37803329704.
+Les **82 tests Windows ordinaires** et **84 tests ci-audio** passent, ainsi
+que Clippy, les deux builds release, le MSI, son installation/désinstallation
+et le contrôle GUI/IPC. L'image récupérée par les logs bornés est inspectée
+visuellement. Le build, les tests, la GUI et le MSI tournent sur des VM GitHub ;
+aucune capture matérielle, lecture sonore ni installation MSI n'est exécutée
+sur le PC personnel. Les sources sont publiées sur
+`audit/windows-synthetic-audio-service-20261008` ; les dernières notes de
+suivi seules sont locales et ne changent pas l'état applicatif validé.
+
+Le diagnostic supplémentaire du signal import ne justifie pas de réécrire
+les annotations : exclure uniquement les trames quasi nulles laisse encore
+l'erreur au-dessus de 0,05. Le modèle manque une réponse courte et faible ;
+une correction de couverture et sa validation sur les six scénarios restent
+à établir. Les seuils, fixtures et contrôles sont conservés. Travail incomplet,
+compteur final **0/2** ; les CI vertes ne sont pas comptées comme deux audits.
+
+## Reprise après le bilan Windows
+
+Le test indépendant du même modèle en FP32, téléchargé à la même révision
+et vérifié par SHA-256, produit exactement les mêmes tours et la même erreur
+import que le modèle int8. Remplacer le modèle ne résout pas l'échec. Le
+diagnostic séparé des fins de clips montre des amplitudes très faibles dans
+les portions encore annotées comme parole ; ces observations ne constituent
+pas une référence suffisante pour modifier les annotations ou les seuils.
+
+Deux défauts supplémentaires sont reproduits par des tests avant correction :
+un layout Windows à deux canaux FC/LFE était interprété comme FL/FR ; un
+client IPC Linux lent conservait son reader après retrait du writer. Le
+convertisseur respecte désormais le masque de positions, et le socket est
+fermé dans les deux sens avant son retrait. La stéréo FL/FR garde sa conversion
+directe. Les six tests de conversion extraits, les 75 tests Linux, Clippy dans
+les deux configurations et les contrôles Windows croisés réussissent. PORTING
+est corrigé pour décrire les runners et les tests synthétiques actuels.
+Une nouvelle CI native et une nouvelle exécution complète du banc sont
+nécessaires sur ce nouvel état. Compteur **0/2**.

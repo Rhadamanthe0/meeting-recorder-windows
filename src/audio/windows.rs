@@ -524,8 +524,8 @@ fn downmix_samples(channels: usize, mask: u32, sample: impl Fn(usize) -> f32) ->
 ///
 /// Mapping des canaux natifs selon le masque WAVEFORMATEXTENSIBLE :
 /// - 1 canal : mono dupliqué sur L/R ;
-/// - 2 canaux : stéréo direct (FL/FR) ;
-/// - multicanal : downmix via [`downmix_samples`] (centre/surrounds à 0.707,
+/// - 2 canaux FL/FR : stéréo direct ;
+/// - autres layouts : downmix via [`downmix_samples`] (centre/surrounds à 0.707,
 ///   seul le LFE est ignoré, normalisation anti-saturation) ;
 /// - masque absent/incohérent : layout standard WASAPI pour ce nombre de
 ///   canaux, puis contribution centrale pour les positions non nommées.
@@ -566,8 +566,8 @@ impl Converter {
                 // Mono dupliqué.
                 let v = sample(0);
                 (v, v)
-            } else if channels == 2 {
-                // Stéréo direct.
+            } else if channels == 2 && self.desc.channel_mask == 0x3 {
+                // Stéréo direct seulement pour Front Left / Front Right.
                 (sample(0), sample(1))
             } else {
                 downmix_samples(channels, self.desc.channel_mask, sample)
@@ -1173,6 +1173,36 @@ mod tests {
     fn full_scale_on_every_channel_does_not_clip() {
         let (left, right) = downmix_samples(8, 0x63f, |_| -1.0);
         assert!(left.abs() <= 1.0 && right.abs() <= 1.0);
+    }
+
+    #[test]
+    fn two_channel_layout_uses_the_declared_speaker_positions() {
+        let convert = |mask, samples: [f32; 2]| {
+            let raw: Vec<u8> = samples.into_iter().flat_map(f32::to_le_bytes).collect();
+            let mut converter = Converter {
+                desc: MixDesc {
+                    rate: RATE,
+                    channels: 2,
+                    channel_mask: mask,
+                    kind: SampleKind::F32,
+                    blockalign: 8,
+                    valid: true,
+                },
+                pos: 0.0,
+            };
+            let mut bytes = Vec::new();
+            converter.push_packet(&raw, &mut bytes);
+            assert_eq!(bytes.len(), 4);
+            (
+                i16::from_le_bytes([bytes[0], bytes[1]]),
+                i16::from_le_bytes([bytes[2], bytes[3]]),
+            )
+        };
+        assert_eq!(convert(0x3, [0.5, -0.5]), (16_384, -16_384)); // FL FR.
+        let (left, right) = convert(0xc, [0.5, 0.0]); // FC LFE.
+        assert!(left > 10_000);
+        assert_eq!(left, right, "center voice must reach both sides");
+        assert_eq!(convert(0xc, [0.0, 0.5]), (0, 0)); // Only the LFE.
     }
 
     #[test]
