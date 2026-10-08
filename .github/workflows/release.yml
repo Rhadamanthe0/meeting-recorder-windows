@@ -34,6 +34,9 @@ jobs:
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
+      # Même locale UTF-8 que le build Windows exécuté en service.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     defaults:
       run:
         shell: pwsh

@@ -4270,7 +4270,8 @@ pub fn safe_name(text: &str) -> String {
     }
 }
 
-/// A DOS device name (CON, PRN, AUX, NUL, COM1…COM9, LPT1…LPT9),
+/// A DOS device name (CON, PRN, AUX, NUL, COM1…COM9, LPT1…LPT9,
+/// including Windows' superscript ¹, ² and ³ aliases),
 /// case-insensitive, with or without an extension: Windows refuses to create
 /// or rename a file to one of these.
 fn is_reserved_name(name: &str) -> bool {
@@ -4279,7 +4280,12 @@ fn is_reserved_name(name: &str) -> bool {
     match upper.as_bytes() {
         [b'C', b'O', b'N'] | [b'P', b'R', b'N'] | [b'A', b'U', b'X'] | [b'N', b'U', b'L'] => true,
         [b'C', b'O', b'M', d] | [b'L', b'P', b'T', d] if (b'1'..=b'9').contains(d) => true,
-        _ => false,
+        _ => matches!(
+            upper
+                .strip_prefix("COM")
+                .or_else(|| upper.strip_prefix("LPT")),
+            Some("¹" | "²" | "³")
+        ),
     }
 }
 
@@ -4440,13 +4446,17 @@ mod tests {
 
     #[test]
     fn reserved_device_names_get_a_suffix_with_or_without_extension() {
-        for name in ["CON", "prn", "Aux", "NUL", "com1", "COM9", "lpt1", "LPT9"] {
+        for name in [
+            "CON", "prn", "Aux", "NUL", "com1", "COM9", "lpt1", "LPT9", "COM¹", "com²", "COM³",
+            "LPT¹", "lpt²", "LPT³",
+        ] {
             let safe = safe_name(name);
             assert!(!is_reserved_name(&safe), "{name} -> {safe}");
             assert!(safe.ends_with('_'), "{name} -> {safe}");
         }
         assert_eq!(safe_name("con.txt"), "con_.txt");
         assert_eq!(safe_name("NUL.ogg"), "NUL_.ogg");
+        assert_eq!(safe_name("com¹.txt"), "com¹_.txt");
         // Not reserved: untouched.
         assert_eq!(safe_name("console"), "console");
         assert_eq!(safe_name("com10"), "com10");

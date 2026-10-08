@@ -182,3 +182,20 @@ le service du runner et indique qu'il est à nouveau actif. Le contrôle est
 incomplet et ne compte pas comme réussi. L'audit des 278 dépendances relancé
 le 8 octobre réussit, sans vulnérabilité connue signalée. Les commentaires
 de CI ne donnent plus une version Cargo 0.1.11 obsolète (le dépôt est 0.1.13).
+
+Après le redémarrage, l'annulation forcée a clôturé le job interrompu.
+Le même commit `c70c58a` a été lancé sur la branche distincte
+`audit/windows-synthetic-audio-service-20261008` (run `37787766647`) pour
+contourner temporairement le verrou du premier run. Ce run a échoué pendant
+l'installation MSYS2 avant toute compilation. Le journal montre un profil
+`Système` et des erreurs `Illegal byte sequence` dans fontconfig. Une locale
+UTF-8 explicite est maintenant fournie aux builds Windows et release ;
+son effet sur la préparation native reste à confirmer.
+
+La relecture confirme aussi les alias Windows réservés `COM¹`, `COM²`,
+`COM³`, `LPT¹`, `LPT²` et `LPT³`, documentés par Microsoft mais oubliés par
+le filtre. Ils empêchaient de sauvegarder un manifeste portant ce titre.
+Le test existant est étendu aux six alias et à une extension : il échoue
+sur l'ancien code (`COM¹ -> COM¹`) puis réussit après correction, sans
+ouvrir aucun périphérique. Les 74 tests Linux, Clippy ci-audio et le
+formatage réussissent sur cet état. Compteur **0/2**.

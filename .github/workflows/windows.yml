@@ -23,6 +23,10 @@ jobs:
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
+      # Le compte de service français « Système » a un nom non ASCII.
+      # Les outils natifs MSYS2 doivent interpréter ses chemins en UTF-8.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     defaults:
       run:
         shell: pwsh
