@@ -36,5 +36,6 @@ name = "meeting-recorder-windows"
 path = "src/main.rs"
 
 [patch.crates-io]
+whisper-rs = { path = "third-party/whisper-rs" }
 # whisper-rs-sys 0.15.0 vendored sous third-party/ (+3 patchs GNU/MinGW, voir son historique) : pas de dépendance réseau.
 whisper-rs-sys = { path = "third-party/whisper-rs-sys" }

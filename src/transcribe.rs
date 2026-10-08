@@ -54,6 +54,21 @@ pub type Abort = Arc<AtomicBool>;
 
 pub const CANCELLED: &str = "transcription cancelled";
 
+fn validate_language(language: &str) -> Result<(), String> {
+    if language == "auto"
+        || (0..=whisper_rs::get_lang_max_id()).any(|id| {
+            whisper_rs::get_lang_str(id) == Some(language)
+                || whisper_rs::get_lang_str_full(id) == Some(language)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown transcription language {language:?}; use auto or a Whisper language code"
+        ))
+    }
+}
+
 /// Only one heavy job (transcription, diarization) runs at a time: whisper
 /// and the speaker model each take most of the CPU and memory.
 static HEAVY_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -641,6 +656,7 @@ pub fn transcribe(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    validate_language(language)?;
     let _slot = acquire_heavy_slot(events, abort)?;
     let duration_secs = (mic.len().max(computer.len()) / WHISPER_RATE) as i64;
     let empty = |language: &str| Transcript {
@@ -934,6 +950,7 @@ pub fn transcribe_single(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    validate_language(language)?;
     let _slot = acquire_heavy_slot(events, abort)?;
     let duration_secs = (track.len() / WHISPER_RATE) as i64;
     let empty = || Transcript {
@@ -1558,7 +1575,7 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
     let [mic_path, computer_path] = files.as_slice() else {
         return usage();
     };
-    run_cli(|events, abort| {
+    run_cli(&language, |events, abort| {
         let mic = load_track(mic_path)?;
         let computer = load_track(computer_path)?;
         transcribe(&mic, &computer, &language, events, abort)
@@ -1591,7 +1608,7 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let [path] = files.as_slice() else {
         return usage();
     };
-    run_cli(|events, abort| {
+    run_cli(&language, |events, abort| {
         let track = load_track(path)?;
         transcribe_single(&track, &language, speakers, events, abort)
     })
@@ -1599,7 +1616,14 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
 
 /// Runs a transcription for the command line: progress and live lines on
 /// stderr, the Markdown on stdout.
-fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> glib::ExitCode {
+fn run_cli(
+    language: &str,
+    work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>,
+) -> glib::ExitCode {
+    if let Err(message) = validate_language(language) {
+        eprintln!("{APP_NAME}: {message}");
+        return glib::ExitCode::from(2);
+    }
     let (tx, rx) = async_channel::unbounded();
     let started = Instant::now();
     let reporter = std::thread::spawn(move || {
@@ -1659,6 +1683,29 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_languages_are_rejected_before_audio_loading_or_transcription() {
+        for id in 0..=whisper_rs::get_lang_max_id() {
+            assert!(validate_language(whisper_rs::get_lang_str(id).unwrap()).is_ok());
+            assert!(validate_language(whisper_rs::get_lang_str_full(id).unwrap()).is_ok());
+        }
+        assert!(validate_language("auto").is_ok());
+        let (events, receiver) = async_channel::unbounded();
+        let abort = Abort::default();
+        for language in ["invalid-language", "", "fr\0", "日本語"] {
+            assert!(transcribe(&[], &[], language, &events, &abort).is_err());
+            assert!(transcribe_single(&[], language, None, &events, &abort).is_err());
+            let called = std::cell::Cell::new(false);
+            let exit = run_cli(language, |_, _| {
+                called.set(true);
+                Err("the audio must not be loaded".into())
+            });
+            assert_eq!(exit, glib::ExitCode::from(2));
+            assert!(!called.get());
+        }
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[test]
     fn whisper_callbacks_release_their_data_and_keep_progress_and_abort_behavior() {

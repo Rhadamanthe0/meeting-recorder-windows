@@ -422,3 +422,27 @@ all-targets, les Clippy normal/ci-audio et le build release réussissent.
 La description du module est aussi corrigée pour correspondre aux deux passes
 de transcription réelles. La CI et le banc audio doivent confirmer cet état
 avant de reprendre les deux audits consécutifs.
+
+## Langue de transcription et stockage des paramètres
+
+Une langue inconnue était acceptée par la CLI puis transmise au backend avec
+un identifiant invalide. La validation utilise maintenant les codes et noms
+réellement reconnus par Whisper, ainsi que auto, avant lecture audio, chargement
+des modèles et lancement du reporter. Les deux commandes CLI refusent une
+langue inconnue avec code 2 et un seul message ; un test vérifie que le travail
+n'est pas lancé.
+
+Le setter de langue de whisper-rs 0.16 allouait aussi une CString avec into_raw
+sans libération. Une copie du même paquet, licence et provenance conservées
+dans third-party/whisper-rs/PATCHES.md, retient la chaîne avec Arc : clones
+sûrs, remplacement et destruction libèrent leur stockage. Aucune version ni
+dépendance supplémentaire. Un test d'intégration stable mesure les allocations
+réelles sur 100 remplacements et un clone : zéro octet restant après destruction.
+Les 79 tests applicatifs et ce test d'intégration passent, ainsi que les deux
+Clippy all-targets et le build release. L'appel direct aux tests upstream via
+cargo -p ne convient pas à ce paquet hors workspace ; le test d'intégration
+reste exécuté par la commande cargo test normale et par la CI.
+
+La CI Windows du commit af2ae6e a réussi (run 37816135489), y compris GUI
+synthétique et installation/désinstallation MSI en VM. Une nouvelle CI et le
+banc complet vérifient maintenant la correction de langue. Compteur 0/2.
