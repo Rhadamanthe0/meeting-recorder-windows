@@ -52,4 +52,5 @@ global au bureau. Ses journaux, état IPC et image figurent dans l'artefact
 Si la VM ne permet pas le rendu d'une fenêtre, ce contrôle échoue explicitement.
 La simulation ne valide pas les échanges WASAPI avec un pilote, les changements
 de périphérique ou la qualité acoustique réelle. Ces contrôles restent distincts.
-L'échec connu du banc de diarisation `import` n'est pas corrigé par ce mode.
+Le banc de transcription et de diarisation reste un contrôle distinct : les
+tons synthétiques ne mesurent pas la reconnaissance des paroles ou des voix.
