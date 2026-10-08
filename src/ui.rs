@@ -2356,7 +2356,8 @@ impl Recorder {
             .map(|s| s.to_string())
             .unwrap_or_default();
         let mut markdown = transcribe::to_markdown(&self.title(), &date, &transcript);
-        if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
+        let mut updated_manifest = self.manifest.borrow().clone();
+        if let Some(manifest) = updated_manifest.as_mut() {
             // An import finds its own number of speakers; keep names already
             // given and number the rest.
             if manifest.imported.is_some() {
@@ -2428,13 +2429,9 @@ impl Recorder {
             // Chapters of a previous transcript would point at lines that are gone.
             manifest.chapters.clear();
             manifest.chapters_by = None;
-            if meeting::write(&out, manifest).is_err() {
-                self.toast("Could not save the meeting file");
-                return Err("could not save the meeting file".into());
-            }
         }
-        meeting::atomic_write(&out.join("transcript.md"), markdown.as_bytes())
-            .map_err(|e| format!("could not write the transcript: {e}"))?;
+        meeting::write_transcript(&out, updated_manifest.as_ref(), markdown.as_bytes())?;
+        *self.manifest.borrow_mut() = updated_manifest;
         self.transcript_rev
             .set(self.transcript_rev.get().wrapping_add(1));
         if transcript.diarization_failed {
@@ -2932,48 +2929,34 @@ impl Recorder {
     }
 
     fn store_chapters(self: &Rc<Self>, dir: &std::path::Path, list: &[Chapter], agent: &Agent) {
-        let mut saved = true;
         // Merge with what is on disk: the manifest may have changed meanwhile.
         let on_disk = meeting::open(dir).map(|(_, m)| m);
-        if let Some(manifest) = self.manifest.borrow_mut().as_mut() {
+        let mut updated = self.manifest.borrow().clone();
+        if let Some(manifest) = updated.as_mut() {
             if let Some(disk) = on_disk {
-                manifest.title = disk.title.clone();
-                manifest.speakers = disk.speakers.clone();
-                manifest.labels = disk.labels.clone();
-                manifest.language = disk.language.clone();
+                manifest.title = disk.title;
+                manifest.speakers = disk.speakers;
+                manifest.labels = disk.labels;
+                manifest.language = disk.language;
             }
             manifest.chapters = list.to_vec();
             manifest.chapters_by = Some(agent.id.clone());
-            if meeting::write(dir, manifest).is_err() {
-                saved = false;
-            } else if let Some(updated) = meeting::open(dir).map(|(_, m)| m) {
-                *manifest = updated;
-            }
         }
-        let transcript = dir.join("transcript.md");
-        match std::fs::read_to_string(&transcript) {
-            Ok(text) => {
-                if meeting::atomic_write(
-                    &transcript,
-                    chapters::apply_to_markdown(&text, list).as_bytes(),
-                )
-                .is_err()
-                {
-                    saved = false;
-                } else {
-                    self.transcript_rev
-                        .set(self.transcript_rev.get().wrapping_add(1));
-                }
-            }
-            Err(_) => saved = false,
+        let Ok(text) = std::fs::read_to_string(dir.join("transcript.md")) else {
+            self.toast("Could not read the transcript; chapters were not saved");
+            return;
+        };
+        let markdown = chapters::apply_to_markdown(&text, list);
+        if let Err(message) = meeting::write_transcript(dir, updated.as_ref(), markdown.as_bytes())
+        {
+            self.toast(&format!("Could not save the chapters: {message}"));
+            return;
         }
-        let text = std::fs::read_to_string(&transcript).ok();
-        self.show_transcript(text.as_deref(), None);
-        if saved {
-            self.toast(&format!("{} chapters added", list.len()));
-        } else {
-            self.toast("Could not save the chapters");
-        }
+        *self.manifest.borrow_mut() = updated;
+        self.transcript_rev
+            .set(self.transcript_rev.get().wrapping_add(1));
+        self.show_transcript(Some(&markdown), None);
+        self.toast(&format!("{} chapters added", list.len()));
     }
 
     /// One paragraph of the transcript: time, speaker and text in columns, with

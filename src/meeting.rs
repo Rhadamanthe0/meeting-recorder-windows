@@ -266,6 +266,43 @@ pub fn write(dir: &Path, manifest: &Manifest) -> std::io::Result<PathBuf> {
     Ok(target)
 }
 
+/// Save a new transcript before its metadata, restoring the previous text if
+/// metadata cannot be saved. The caller commits its in-memory manifest only
+/// after this succeeds. This handles I/O failures, not a crash between writes.
+pub fn write_transcript(
+    dir: &Path,
+    manifest: Option<&Manifest>,
+    contents: &[u8],
+) -> Result<(), String> {
+    let target = dir.join("transcript.md");
+    let previous = if manifest.is_some() {
+        match std::fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("could not read the previous transcript: {error}")),
+        }
+    } else {
+        None
+    };
+    atomic_write(&target, contents)
+        .map_err(|error| format!("could not write the transcript: {error}"))?;
+    if let Some(manifest) = manifest
+        && let Err(error) = write(dir, manifest)
+    {
+        let restored = match previous {
+            Some(bytes) => atomic_write(&target, &bytes),
+            None => std::fs::remove_file(&target),
+        };
+        return Err(match restored {
+            Ok(()) => format!("could not save the meeting file: {error}"),
+            Err(rollback) => format!(
+                "could not save the meeting file: {error}; could not restore the previous transcript: {rollback}; check the meeting files"
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     // Unique per attempt so two writers never share a temp file: nanos +
@@ -469,6 +506,57 @@ mod tests {
         assert!(!old.exists());
         assert!(std::fs::read_to_string(&new).unwrap().contains("Beta"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcript_and_metadata_keep_the_previous_pair_on_save_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "verify-transcript-pair-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let mut original =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        original.title = "Alpha".into();
+        super::write(&dir, &original).unwrap();
+        let mut updated = original.clone();
+        updated.speakers = vec!["New name".into(), "Other name".into()];
+        let transcript = dir.join("transcript.md");
+
+        // An unreadable transcript must not change persisted speaker names.
+        std::fs::create_dir(&transcript).unwrap();
+        assert!(super::write_transcript(&dir, Some(&updated), b"new text").is_err());
+        assert_eq!(super::open(&dir).unwrap().1.speakers, original.speakers);
+        std::fs::remove_dir(&transcript).unwrap();
+
+        // A manifest collision must restore the exact old bytes, including
+        // text a previous version cannot parse, or remove a first transcript.
+        updated.title = "Beta".into();
+        let collision = super::path_for(&dir, &updated.title);
+        std::fs::create_dir(&collision).unwrap();
+        let old_text = b"# Alpha\n\nold text\xff\n";
+        std::fs::write(&transcript, old_text).unwrap();
+        assert!(super::write_transcript(&dir, Some(&updated), b"new text").is_err());
+        assert_eq!(std::fs::read(&transcript).unwrap(), old_text);
+        assert_eq!(super::open(&dir).unwrap().1.title, original.title);
+        std::fs::remove_file(&transcript).unwrap();
+        assert!(super::write_transcript(&dir, Some(&updated), b"new text").is_err());
+        assert!(!transcript.exists());
+        assert!(collision.is_dir());
+
+        // A successful save commits both files; a metadata-free save still
+        // supports legacy meetings.
+        std::fs::remove_dir(&collision).unwrap();
+        super::write_transcript(&dir, Some(&updated), b"new text").unwrap();
+        assert_eq!(std::fs::read(&transcript).unwrap(), b"new text");
+        assert_eq!(super::open(&dir).unwrap().1.speakers, updated.speakers);
+        super::write_transcript(&dir, None, b"legacy text").unwrap();
+        assert_eq!(std::fs::read(&transcript).unwrap(), b"legacy text");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

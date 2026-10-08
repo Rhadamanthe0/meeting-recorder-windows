@@ -446,3 +446,21 @@ reste exécuté par la commande cargo test normale et par la CI.
 La CI Windows du commit af2ae6e a réussi (run 37816135489), y compris GUI
 synthétique et installation/désinstallation MSI en VM. Une nouvelle CI et le
 banc complet vérifient maintenant la correction de langue. Compteur 0/2.
+
+## Sauvegarde cohérente du transcript et de son manifeste
+
+La nouvelle transcription mettait à jour les noms de locuteurs, le modèle et
+les chapitres du manifeste avant d'écrire le texte. Un échec du transcript
+pouvait donc conserver l'ancien texte avec les nouvelles métadonnées. Le même
+ordre existait pour les chapitres. La sauvegarde écrit désormais le transcript
+avant le manifeste et restaure les anciens octets si le manifeste échoue ;
+un premier transcript est retiré dans ce cas. L'état mémoire n'est validé
+qu'après succès. Les erreurs de restauration sont signalées explicitement.
+Cela traite les erreurs d'I/O, sans promettre une transaction entre deux fichiers
+résistante à un crash. Un message toast redondant avec le résultat de
+transcription a été retiré de ce chemin d'échec.
+
+Un test réel couvre un transcript illisible, une collision de manifeste, la
+restauration exacte d'octets non UTF-8, l'absence de premier transcript après
+échec, le succès des deux écritures et les réunions héritées sans manifeste.
+Les 80 tests applicatifs Linux et le test d'intégration mémoire passent.
