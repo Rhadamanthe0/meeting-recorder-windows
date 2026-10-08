@@ -3188,7 +3188,13 @@ impl Recorder {
     ) -> Option<(String, String)> {
         let dir = self.result_dir.borrow().clone()?;
         let path = dir.join("transcript.md");
-        let before = std::fs::read_to_string(&path).ok()?;
+        let before = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => {
+                self.toast("Could not read the transcript; changes were not saved");
+                return None;
+            }
+        };
         let mut lines: Vec<String> = before.lines().map(str::to_owned).collect();
         change(&mut lines);
         // Removing lines leaves their blank separators behind; keep one.
@@ -3282,6 +3288,8 @@ impl Recorder {
             if meeting::atomic_write(&dir.join("transcript.md"), before.as_bytes()).is_ok() {
                 r.transcript_rev.set(r.transcript_rev.get().wrapping_add(1));
                 r.redraw_transcript(&before);
+            } else {
+                r.toast("Could not restore the deleted line");
             }
         });
         self.toasts.add_toast(toast);

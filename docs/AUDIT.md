@@ -28,6 +28,9 @@ par ligne exhaustive.
 | Entrées et configuration | Horodatages et couleurs invalides sans panic ni débordement ; caractères de contrôle filtrés des noms. Lecture des paramètres racine avec guillemets, chemins Windows et caractères # préservés. Chemins des actions rendus absolus avant changement de répertoire. |
 | Outillage et documentation | Exemple compilable avec all-targets et corrections des diagnostics des contrôles existants. Échecs WiX bloquants, version MSI issue de Cargo, schémas GTK limités au processus. Suivi Cargo de GGML_NATIVE et des options CMake transmises, pour éviter un cache de compilation obsolète. Banc utilisant le vrai nom du binaire et refusant erreurs ou mesures absentes. Installation source et limites documentées corrigées. Notes Obsidian : échappement des noms en YAML et écriture UTF-8 explicite. |
 
+- Édition et Undo : erreurs de lecture et de restauration désormais affichées,
+  sans modification des données sur échec. Parcours GTK réel : édition,
+  suppression/Undo, dossier non inscriptible et transcript illisible vérifiés.
 - Renommage de réunion : restauration du dossier si la lecture ou l'écriture
   du transcript ou du manifeste échoue ; collision refusée sans écrasement.
 - Transcription et chapitres : sauvegarde du texte avant le manifeste,
