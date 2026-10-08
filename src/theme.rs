@@ -156,8 +156,8 @@ fn css(theme: &Theme) -> String {
             --warning-bg-color: {yellow}; --warning-fg-color: {on_yellow}; --warning-color: {yellow};
         }}
         .speaker-0 {{ color: {blue}; }} .speaker-1 {{ color: {orange}; }}
-        .speaker-2 {{ color: {green}; }} .speaker-3 {{ color: {magenta}; }}
-        .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {yellow}; }}",
+        .speaker-2 {{ color: {speaker_green}; }} .speaker-3 {{ color: {magenta}; }}
+        .speaker-4 {{ color: {cyan}; }} .speaker-5 {{ color: {speaker_yellow}; }}",
         bg = hex(bg),
         fg = hex(fg),
         dark_bg = hex(dark_bg),
@@ -171,10 +171,12 @@ fn css(theme: &Theme) -> String {
         on_green = hex(on(green)),
         yellow = hex(yellow),
         on_yellow = hex(on(yellow)),
-        blue = hex(blue),
-        orange = hex(orange),
-        magenta = hex(get("magenta", "bright_magenta").unwrap_or(accent)),
-        cyan = hex(get("cyan", "bright_cyan").unwrap_or(accent)),
+        blue = hex(mix(fg, blue, 0.35)),
+        orange = hex(mix(fg, orange, 0.35)),
+        speaker_green = hex(mix(fg, green, 0.35)),
+        speaker_yellow = hex(mix(fg, yellow, 0.35)),
+        magenta = hex(mix(fg, get("magenta", "bright_magenta").unwrap_or(accent), 0.35)),
+        cyan = hex(mix(fg, get("cyan", "bright_cyan").unwrap_or(accent), 0.35)),
     )
 }
 

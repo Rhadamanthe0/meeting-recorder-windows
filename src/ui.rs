@@ -4279,8 +4279,12 @@ fn load_css() {
          .transcript row.chapter:first-child { padding-top: 7px; }
          .chapter-heading { font-weight: 800; font-size: 1.08em; }
          .speaker-0, .speaker-1, .speaker-2, .speaker-3, .speaker-4, .speaker-5 { font-weight: 700; }
-         .speaker-0 { color: #5a9cf0; } .speaker-1 { color: #f08a3a; } .speaker-2 { color: #57c27a; }
-         .speaker-3 { color: #d066c8; } .speaker-4 { color: #3fc4cf; } .speaker-5 { color: #d9b53a; }
+         .speaker-0 { color: mix(@view_fg_color, #5a9cf0, 0.35); }
+         .speaker-1 { color: mix(@view_fg_color, #f08a3a, 0.35); }
+         .speaker-2 { color: mix(@view_fg_color, #57c27a, 0.35); }
+         .speaker-3 { color: mix(@view_fg_color, #d066c8, 0.35); }
+         .speaker-4 { color: mix(@view_fg_color, #3fc4cf, 0.35); }
+         .speaker-5 { color: mix(@view_fg_color, #d9b53a, 0.35); }
          .drop-hint { margin: 10px; border: 3px dashed @accent_color; border-radius: 14px;
                       background: alpha(@window_bg_color, 0.88); color: @accent_color; }
          .row-actions { opacity: 0; transition: opacity 120ms; }
