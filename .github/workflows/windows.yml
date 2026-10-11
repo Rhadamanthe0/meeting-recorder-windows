@@ -5,24 +5,19 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      hosted:
-        description: "Utiliser une VM Windows GitHub si le runner personnel est indisponible"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 # Un push annule le run precedent de la meme ref (package MSI couteux).
 concurrency:
-  group: windows-${{ github.ref }}-${{ inputs.hosted && 'hosted' || 'local' }}
+  group: windows-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    # Push et PR internes → PCs du propriétaire ; PRs de forks (code arbitraire) → GitHub.
-    runs-on: ${{ (inputs.hosted || github.event.pull_request.head.repo.fork) && 'windows-latest' || fromJSON('["self-hosted", "windows", "x64", "meeting-recorder"]') }}
+    # Chaque job, y compris les forks, utilise une VM MINIPC neuve et isolée.
+    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: read
     env:
@@ -367,8 +362,8 @@ jobs:
             }
           } finally { $probe.Dispose() }
 
-      # Le service Windows n'a pas de bureau interactif. Seul le runtime
-      # synthétique est transmis à une VM GitHub pour vérifier le rendu.
+      # Seul le runtime synthétique est transmis à une autre VM MINIPC neuve
+      # pour vérifier le rendu dans son bureau interactif.
       - name: Prépare le runtime GUI synthétique
         run: |
           $testStage = Join-Path $env:GITHUB_WORKSPACE "synthetic-runtime"
@@ -403,7 +398,7 @@ jobs:
 
   verify-gui:
     needs: build
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     defaults:
       run:
         shell: pwsh
@@ -427,7 +422,7 @@ jobs:
 
   verify-msi:
     needs: build
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     defaults:
       run:
         shell: pwsh
