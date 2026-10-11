@@ -170,6 +170,9 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
+      - name: Installer et vérifier le runtime Visual C++ requis par ORT
+        run: ./packaging/windows/install-vc-runtime.ps1
+
       # Tests (export.rs) : ffmpeg réel exigé (spawn via `.unwrap()`), fourni
       # sans winget : ZIP GyanD/codexffmpeg 9.0.2 pinné vérifié (taille +
       # SHA-256 AVANT Expand-Archive). Seul le dossier `bin` rejoint le PATH.
