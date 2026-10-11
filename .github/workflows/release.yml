@@ -27,8 +27,8 @@ concurrency:
 
 jobs:
   build:
-    # Tags + dispatch manuel : jamais de code de fork → PCs du propriétaire.
-    runs-on: [self-hosted, windows, x64, meeting-recorder]
+    # Tags + dispatch manuel : jamais de code de fork ; VM Windows neuve sur MINIPC-CLEM.
+    runs-on: [self-hosted, windows, x64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: read
     env:
@@ -335,7 +335,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, minipc, podman]
     permissions:
       contents: write
     steps:

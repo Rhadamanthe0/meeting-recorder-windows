@@ -16,8 +16,9 @@ concurrency:
 
 jobs:
   build:
-    # Push et PR internes → PCs du propriétaire ; PRs de forks (code arbitraire) → GitHub.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'windows-latest' || fromJSON('["self-hosted", "windows", "x64", "meeting-recorder"]') }}
+    # Windows sur MINIPC-CLEM uniquement ; VM neuve par job pour que le code
+    # des PR ne persiste pas dans l'environnement qui produit les releases.
+    runs-on: [self-hosted, windows, x64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: read
     env:
