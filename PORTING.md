@@ -31,8 +31,8 @@ diarisation Nemotron ONNX, résumé via LM Studio/Ollama OpenAI-compatible).
   construit en CI, publié en release ; `MeetingRecorder-<version>.msi`,
   double-clic sans admin) + voie source avancée (Rust GNU, MSYS2 UCRT64,
   ffmpeg, `cargo build --release`), `.github/workflows/windows.yml`
-  (build sur runner Windows personnel, VM GitHub en repli manuel et pour les
-  PR de forks ; vérifications GUI/MSI sur VM GitHub), `.gitignore` complété.
+  (build et vérifications GUI/MSI dans des VM Windows KVM jetables sur
+  MINIPC-CLEM, y compris pour les PR de forks), `.gitignore` complété.
 
 Écart de nommage connu (réel, cf. `src/main.rs:27`) : le binaire Cargo est
 `meeting-recorder-windows`, mais `APP_NAME` vaut encore

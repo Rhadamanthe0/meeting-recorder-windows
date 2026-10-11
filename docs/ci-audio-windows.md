@@ -1,17 +1,15 @@
 # Tests Windows sans accès aux périphériques audio
 
-Le workflow `windows` utilise le runner `[self-hosted, windows, x64,
-meeting-recorder]`. Les PR de forks restent sur `windows-latest`.
-
-Si le runner personnel est indisponible, le lancement manuel du workflow
-avec `hosted=true` utilise une VM Windows GitHub pour le build et les mêmes
-contrôles. Ce choix est séparé de l'exécution locale dans la concurrence CI.
+Tous les jobs Windows de `windows` et `release` utilisent une VM KVM neuve
+sur MINIPC-CLEM, avec les labels `self-hosted,windows,x64,minipc,ephemeral,
+meeting-recorder` et un label propre au run et à sa tentative. Les PR de forks
+utilisent le profil de test isolé. Le lancement manuel utilise également
+MINIPC-CLEM.
 
 Les tests ordinaires n'ouvrent pas de périphérique audio. Le MSI produit est
 le binaire normal. Son installation et sa désinstallation sont vérifiées dans
-le job `verify-msi`, sur une machine GitHub jetable, pour ne pas remplacer une
-installation existante sur le PC. La publication du workflow `release` dépend
-également de cette vérification.
+le job `verify-msi`, dans une autre VM Windows jetable. La publication du
+workflow `release` dépend également de cette vérification.
 
 ## Entrées et sortie simulées
 
@@ -41,9 +39,9 @@ Les tests spécifiques vérifient l'écriture de samples non nuls, la suspension
 des écritures pendant une pause, la reprise et la libération de l'entrée ;
 ils vérifient aussi le décodage et la fin d'une lecture sans sortie matérielle.
 
-Le job `verify-gui` s'exécute sur une VM GitHub Windows jetable, car le runner
-du PC fonctionne comme service sans bureau interactif. Il reçoit le runtime
-synthétique construit par le runner. Le test GUI n'exécute que ce binaire après vérification de sa
+Le job `verify-gui` s'exécute dans une VM Windows jetable sur MINIPC-CLEM,
+avec un bureau interactif. Il reçoit le runtime synthétique construit par le
+job `build`. Le test GUI n'exécute que ce binaire après vérification de sa
 version. Il vérifie son pipe isolé et capture seulement sa fenêtre via
 `PrintWindow`, jamais l'écran complet. Il n'envoie aucune touche ni aucun clic
 global au bureau. Ses journaux, état IPC et image figurent dans l'artefact
