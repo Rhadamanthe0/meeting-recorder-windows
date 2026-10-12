@@ -566,21 +566,22 @@ mod tests {
         let mut manifest =
             super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
         manifest.title = "Alpha".into();
+        manifest.speakers = vec!["Alice".into(), "Bob".into()];
+        manifest.language = "fr".into();
+        manifest.model = Some("small".into());
+        manifest.duration_secs = 300;
+        manifest.chapters = vec![crate::chapters::Chapter {
+            start_ms: 1000,
+            title: "Agenda".into(),
+        }];
+        manifest.chapters_by = Some("claude".into());
         super::write(&dir, &manifest).unwrap();
         manifest.title = "alpha".into();
         let target = super::write(&dir, &manifest).unwrap();
         assert!(target.is_file());
-        assert_eq!(
-            super::Manifest::from_json(
-                &serde_json::from_str(
-                    &std::fs::read_to_string(super::find(&dir).unwrap()).unwrap()
-                )
-                .unwrap()
-            )
-            .unwrap()
-            .title,
-            "alpha"
-        );
+        let (_, restored) = super::open(&target).unwrap();
+        assert_eq!(restored.to_json(), manifest.to_json());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

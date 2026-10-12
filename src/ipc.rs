@@ -231,6 +231,9 @@ pub fn start_line(title: &[String]) -> String {
 /// `omarchy-meeting-recorder stop`: ask the running app to stop recording.
 #[cfg(target_os = "linux")]
 pub fn send(command: &str) -> bool {
+    if command.len() >= MAX_LINE || command.contains(['\n', '\r']) {
+        return false;
+    }
     match UnixStream::connect(socket_path()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
         Err(_) => false,
@@ -454,6 +457,9 @@ pub fn serve(
 /// `meeting-recorder-windows stop`: ask the running app to stop recording.
 #[cfg(target_os = "windows")]
 pub fn send(command: &str) -> bool {
+    if command.len() >= MAX_LINE || command.contains(['\n', '\r']) {
+        return false;
+    }
     use interprocess::local_socket::{Stream, prelude::*};
     match Stream::connect(pipe_name()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
@@ -654,5 +660,17 @@ mod tests {
             .unwrap()
             .push(status("recording", "Standup"));
         assert_eq!(busiest(&statuses).title, "Standup");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_socket_rejects_oversized_start_without_dispatching_stop_suffix() {
+        let (stream, mut client) = UnixStream::pair().unwrap();
+        let input = format!("pause\nstart {}stop\nstop\n", "A".repeat(MAX_LINE - 6));
+        client.write_all(input.as_bytes()).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let (sender, receiver) = async_channel::unbounded();
+        read_commands(stream, &sender);
+        assert_eq!(receiver.try_recv().unwrap(), ("pause", "".into()));
+        assert!(receiver.try_recv().is_err());
     }
 }
