@@ -176,12 +176,18 @@ pub fn serve(
 
 #[cfg(target_os = "linux")]
 fn read_commands(stream: UnixStream, commands: &async_channel::Sender<Command>) {
-    let mut reader = BufReader::new(stream);
+    dispatch_commands(BufReader::new(stream), commands);
+}
+
+/// A bounded frame must include its delimiter. Disconnect on an oversized or
+/// unterminated frame; its suffix can never become a separate command.
+fn dispatch_commands(mut reader: impl BufRead, commands: &async_channel::Sender<Command>) {
     let mut line = String::new();
     loop {
         line.clear();
         match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
             Ok(0) | Err(_) => return,
+            Ok(_) if !line.ends_with('\n') => return,
             Ok(_) => {
                 if let Some(command) = parse_command(&line) {
                     let _ = commands.send_blocking(command);
@@ -221,6 +227,9 @@ pub fn start_line(title: &[String]) -> String {
 /// `omarchy-meeting-recorder stop`: ask the running app to stop recording.
 #[cfg(target_os = "linux")]
 pub fn send(command: &str) -> bool {
+    if command.len() >= MAX_LINE || command.contains(['\n', '\r']) {
+        return false;
+    }
     match UnixStream::connect(socket_path()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
         Err(_) => false,
@@ -375,24 +384,15 @@ fn read_commands(
     stream: interprocess::local_socket::Stream,
     commands: &async_channel::Sender<Command>,
 ) {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.by_ref().take(MAX_LINE as u64).read_line(&mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {
-                if let Some(command) = parse_command(&line) {
-                    let _ = commands.send_blocking(command);
-                }
-            }
-        }
-    }
+    dispatch_commands(BufReader::new(stream), commands);
 }
 
 /// `meeting-recorder-windows stop`: ask the running app to stop recording.
 #[cfg(target_os = "windows")]
 pub fn send(command: &str) -> bool {
+    if command.len() >= MAX_LINE || command.contains(['\n', '\r']) {
+        return false;
+    }
     use interprocess::local_socket::{Stream, prelude::*};
     match Stream::connect(pipe_name()) {
         Ok(mut stream) => stream.write_all(format!("{command}\n").as_bytes()).is_ok(),
@@ -484,5 +484,37 @@ mod tests {
             .unwrap()
             .push(status("recording", "Standup"));
         assert_eq!(busiest(&statuses).title, "Standup");
+    }
+    #[test]
+    fn oversized_or_unterminated_frame_never_dispatches_a_fragment() {
+        for input in [
+            format!("start {}stop\nstop\n", "A".repeat(MAX_LINE - 6)),
+            "stop".into(),
+        ] {
+            let (sender, receiver) = async_channel::unbounded();
+            dispatch_commands(std::io::Cursor::new(input), &sender);
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_frames_dispatch_in_order() {
+        let (sender, receiver) = async_channel::unbounded();
+        dispatch_commands(std::io::Cursor::new("start Weekly\npause\nstop\n"), &sender);
+        assert_eq!(receiver.try_recv().unwrap(), ("start", "Weekly".into()));
+        assert_eq!(receiver.try_recv().unwrap(), ("pause", "".into()));
+        assert_eq!(receiver.try_recv().unwrap(), ("stop", "".into()));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_socket_rejects_oversized_start_without_dispatching_stop_suffix() {
+        let (stream, mut client) = UnixStream::pair().unwrap();
+        let input = format!("pause\nstart {}stop\nstop\n", "A".repeat(MAX_LINE - 6));
+        client.write_all(input.as_bytes()).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let (sender, receiver) = async_channel::unbounded();
+        read_commands(stream, &sender);
+        assert_eq!(receiver.try_recv().unwrap(), ("pause", "".into()));
+        assert!(receiver.try_recv().is_err());
     }
 }

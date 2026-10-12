@@ -398,8 +398,6 @@ struct Recorder {
     system: Source,
     /// A capture init failure already toasted: warn once per outage, not
     /// every 500 ms. Reset when both sources capture fine again.
-    /// (Windows only: `Source::init_error` n'existe que là-bas.)
-    #[cfg(target_os = "windows")]
     capture_warned: Cell<bool>,
     shared: SharedStatus,
     hub: std::rc::Weak<Hub>,
@@ -864,7 +862,6 @@ impl Recorder {
             current_line: Cell::new(-1),
             mic,
             system,
-            #[cfg(target_os = "windows")]
             capture_warned: Cell::new(false),
             shared,
             hub: Rc::downgrade(hub),
@@ -1521,7 +1518,6 @@ impl Recorder {
     }
 
     fn tick(&self) {
-        #[cfg(target_os = "windows")]
         self.warn_capture_once();
         #[cfg(target_os = "windows")]
         self.refresh_endpoint_tooltips();
@@ -1545,9 +1541,9 @@ impl Recorder {
     /// Warns once per outage when a capture source refuses to start (exotic
     /// mix format, missing device, …), instead of silently recording zeros.
     /// Runs on the UI thread from `tick` (500 ms): two mutex reads, no block.
-    #[cfg(target_os = "windows")]
     fn warn_capture_once(&self) {
-        let failing = self
+        #[cfg(target_os = "windows")]
+        let init_failure = self
             .mic
             .init_error()
             .map(|step| ("Microphone", step, false))
@@ -1555,7 +1551,10 @@ impl Recorder {
                 self.system
                     .init_error()
                     .map(|step| ("System audio", step, false))
-            })
+            });
+        #[cfg(target_os = "linux")]
+        let init_failure: Option<(&str, String, bool)> = None;
+        let failing = init_failure
             .or_else(|| {
                 self.mic
                     .write_error()

@@ -9,6 +9,12 @@ mod animation;
 #[path = "../src/theme.rs"]
 mod theme;
 
+#[allow(dead_code)]
+#[path = "../src/platform.rs"]
+mod platform;
+
+const APP_NAME: &str = "omarchy-meeting-recorder";
+
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;

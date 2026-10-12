@@ -239,6 +239,10 @@ pub fn write(dir: &Path, manifest: &Manifest) -> std::io::Result<PathBuf> {
     atomic_write(&target, text.as_bytes())?;
     if let Some(old) = old
         && old != target
+        // Resolve after replacement: on case-insensitive volumes both names
+        // may now refer to the newly written manifest. Never delete that file.
+        && std::fs::canonicalize(&old).ok().zip(std::fs::canonicalize(&target).ok())
+            .is_some_and(|(old, target)| old != target)
     {
         let _ = std::fs::remove_file(old);
     }
@@ -451,5 +455,31 @@ mod tests {
         assert!(!old.exists());
         assert!(std::fs::read_to_string(&new).unwrap().contains("Beta"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn case_only_title_change_preserves_manifest_and_metadata() {
+        let dir = std::env::temp_dir().join(format!("verify-case-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest =
+            super::from_folder(std::path::Path::new("/nowhere/202609291404 Call")).unwrap();
+        manifest.title = "Weekly".into();
+        manifest.speakers = vec!["Alice".into(), "Bob".into()];
+        manifest.language = "fr".into();
+        manifest.model = Some("small".into());
+        manifest.duration_secs = 300;
+        manifest.chapters = vec![crate::chapters::Chapter {
+            start_ms: 1000,
+            title: "Agenda".into(),
+        }];
+        manifest.chapters_by = Some("claude".into());
+        super::write(&dir, &manifest).unwrap();
+        manifest.title = "weekly".into();
+        let target = super::write(&dir, &manifest).unwrap();
+        let (_, restored) = super::open(&target).unwrap();
+        assert_eq!(restored.title, "weekly");
+        assert_eq!(restored.to_json(), manifest.to_json());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
