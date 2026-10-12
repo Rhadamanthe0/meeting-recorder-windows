@@ -177,6 +177,9 @@ jobs:
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
 
+      - name: Installer et vérifier le runtime Visual C++ requis par ORT
+        run: ./packaging/windows/install-vc-runtime.ps1
+
       # Lockfile autoritaire : Cargo.lock complet commité, dépendances Windows
       # incluses. --locked
       # fail-closed : échoue au lieu de résoudre silencieusement. Le lock se met
