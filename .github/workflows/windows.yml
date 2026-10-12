@@ -16,8 +16,9 @@ concurrency:
 
 jobs:
   build:
-    # Push et PR internes → PCs du propriétaire ; PRs de forks (code arbitraire) → GitHub.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'windows-latest' || fromJSON('["self-hosted", "windows", "x64", "meeting-recorder"]') }}
+    # Windows sur MINIPC-CLEM uniquement ; VM neuve par job pour que le code
+    # des PR ne persiste pas dans l'environnement qui produit les releases.
+    runs-on: [self-hosted, windows, x64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: read
     env:
@@ -51,6 +52,8 @@ jobs:
 
       - name: Install GTK4 (MSYS2 UCRT64)
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        env:
+          __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
         with:
           msystem: UCRT64
           update: true
@@ -143,6 +146,9 @@ jobs:
           $ortLib >> $env:GITHUB_PATH
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
+
+      - name: Installer et vérifier le runtime Visual C++ requis par ORT
+        run: ./packaging/windows/install-vc-runtime.ps1
 
       # Lockfile autoritaire : Cargo.lock Windows complet commité (278 packages,
       # root meeting-recorder-windows 0.1.11, deps Windows incluses), --locked

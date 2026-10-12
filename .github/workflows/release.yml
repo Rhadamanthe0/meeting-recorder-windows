@@ -27,8 +27,8 @@ concurrency:
 
 jobs:
   build:
-    # Tags + dispatch manuel : jamais de code de fork → PCs du propriétaire.
-    runs-on: [self-hosted, windows, x64, meeting-recorder]
+    # Tags + dispatch manuel : jamais de code de fork ; VM Windows neuve sur MINIPC-CLEM.
+    runs-on: [self-hosted, windows, x64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: read
     env:
@@ -97,6 +97,8 @@ jobs:
 
       - name: Install GTK4 (MSYS2 UCRT64)
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        env:
+          __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
         with:
           msystem: UCRT64
           update: true
@@ -167,6 +169,9 @@ jobs:
           $ortLib >> $env:GITHUB_PATH
           Write-Output "[ci] ORT_LIB_LOCATION=$ortLib"
           Get-ChildItem $ortLib | ForEach-Object { Write-Output "[ci] ort: $($_.Name)" }
+
+      - name: Installer et vérifier le runtime Visual C++ requis par ORT
+        run: ./packaging/windows/install-vc-runtime.ps1
 
       # Tests (export.rs) : ffmpeg réel exigé (spawn via `.unwrap()`), fourni
       # sans winget : ZIP GyanD/codexffmpeg 9.0.2 pinné vérifié (taille +
@@ -335,7 +340,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, minipc, podman]
     permissions:
       contents: write
     steps:

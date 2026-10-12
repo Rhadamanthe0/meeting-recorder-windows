@@ -67,4 +67,15 @@ llm_model = "qwen3-4b-instruct"
 - Modèle défaut large-v3-turbo (~1,6 Go téléchargés, lent sur CPU : prévoir large pour une longue réunion).
 - Pour tester vite : `model = "small"` dans config.toml.
 
+## CI
+
+Tous les jobs ciblent MINIPC-CLEM, jamais PC-PRO-CLEM ni PC-FIXE-CLEM.
+Les tâches Linux utilisent `self-hosted,linux,x64,minipc,podman`.
+Les compilations, tests et essais MSI Windows utilisent
+`self-hosted,windows,x64,minipc,ephemeral,meeting-recorder` : ces labels
+requièrent une VM Windows neuve par job, sans état réutilisé entre PR et release.
+Sans cet environnement, les jobs Windows restent en attente ; le runner
+Linux ne remplace pas les vérifications natives. Cette migration des workflows
+n'installe ni n'enregistre la VM ou les runners sur le serveur.
+
 D'après [omarchy-meeting-recorder](https://github.com/jankeesvw/omarchy-meeting-recorder). Licence MIT, voir `LICENSE`.
