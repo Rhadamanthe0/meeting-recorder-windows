@@ -47,16 +47,15 @@ fn note_sync_error(inner: &mut Inner, recording: u64, message: String) {
     }
 }
 
-/// Fill elapsed missing frames before the next packet (or through stop/pause).
+/// Fill missing time at a source restart, or through stop/pause.
+/// Contiguous packets use sample counts, never their possibly delayed read time.
 /// A fixed-size zero buffer bounds memory even after a long source outage.
-fn pad_to_clock(inner: &mut Inner, now: Instant, incoming_frames: u64) {
+fn pad_to_clock(inner: &mut Inner, now: Instant) {
     let Some((started, base)) = inner.clock else {
         return;
     };
     let elapsed = now.saturating_duration_since(started).as_nanos();
-    let target = base
-        .saturating_add((elapsed * u128::from(RATE) / 1_000_000_000) as u64)
-        .saturating_sub(incoming_frames);
+    let target = base.saturating_add((elapsed * u128::from(RATE) / 1_000_000_000) as u64);
     let zeroes = [0u8; CHUNK_BYTES];
     while inner.frames < target {
         let frames = (target - inner.frames).min(u64::from(RATE / 50));
@@ -125,7 +124,7 @@ impl Source {
             return;
         }
         if paused {
-            pad_to_clock(&mut inner, Instant::now(), 0);
+            pad_to_clock(&mut inner, Instant::now());
             inner.clock = None;
         } else if inner.file.is_some() {
             inner.clock = Some((Instant::now(), inner.frames));
@@ -139,7 +138,7 @@ impl Source {
     pub fn stop_recording(&self) -> std::io::Result<()> {
         let (write_error, file) = {
             let mut inner = self.inner.lock().unwrap();
-            pad_to_clock(&mut inner, Instant::now(), 0);
+            pad_to_clock(&mut inner, Instant::now());
             inner.clock = None;
             (inner.write_error.take(), inner.file.take())
         };
@@ -197,6 +196,9 @@ fn capture(device: &str, shared: &Mutex<Inner>) {
 }
 
 fn capture_command(device: &str, shared: &Mutex<Inner>, command: &mut Command) {
+    // Timestamp the source transition, not the arrival of its first packet:
+    // spawn/read scheduling and pipe buffering are not capture interruptions.
+    let started = Instant::now();
     let child = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
     let mut child = match child {
         Ok(child) => child,
@@ -211,6 +213,7 @@ fn capture_command(device: &str, shared: &Mutex<Inner>, command: &mut Command) {
         let _ = child.wait();
         return;
     };
+    pad_to_clock(&mut shared.lock().unwrap(), started);
     let mut buf = vec![0u8; CHUNK_BYTES];
     // So a crash loses at most a second: flush every second, and push it to
     // the disk itself every half minute in case the machine goes down too.
@@ -233,7 +236,6 @@ fn capture_command(device: &str, shared: &Mutex<Inner>, command: &mut Command) {
         if inner.paused || inner.file.is_none() {
             continue;
         }
-        pad_to_clock(&mut inner, Instant::now(), u64::from(RATE / 50));
         if let Some(file) = inner.file.as_mut() {
             if let Err(e) = file.write_all(&buf) {
                 note_write_error(&mut inner, "write", e.to_string());
@@ -343,16 +345,12 @@ mod tests {
             let packet = vec![1u8; CHUNK_BYTES];
             inner.file.as_mut().unwrap().write_all(&packet).unwrap();
             inner.frames += u64::from(RATE / 50);
-            // New audio arrives at 1.02 s: its first frame belongs at 1.0 s.
-            pad_to_clock(
-                &mut inner,
-                start + Duration::from_millis(1020),
-                u64::from(RATE / 50),
-            );
+            // The source resumes at 1.0 s, before its next 20 ms packet.
+            pad_to_clock(&mut inner, start + Duration::from_secs(1));
             inner.file.as_mut().unwrap().write_all(&packet).unwrap();
             inner.frames += u64::from(RATE / 50);
             inner.clock = None; // A paused interval contributes no missing samples.
-            pad_to_clock(&mut inner, start + Duration::from_secs(10), 0);
+            pad_to_clock(&mut inner, start + Duration::from_secs(10));
         }
         capture_failed(&source.inner, "fixture", "disconnected");
         assert!(source.write_error().unwrap().contains("disconnected"));
@@ -443,6 +441,51 @@ mod tests {
         assert!(written_frames >= paused_frames + before_stop_frames);
         assert!(written_frames <= paused_frames + after_stop_frames);
         assert!(std::fs::read(&path).unwrap().iter().all(|byte| *byte == 0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn buffered_packets_do_not_create_an_internal_silent_gap() {
+        let dir = std::env::temp_dir().join(format!("capture-backlog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audio.raw");
+        let source = Source {
+            inner: Arc::new(Mutex::new(Inner {
+                levels: VecDeque::from(vec![0.0; HISTORY]),
+                file: None,
+                recording: 0,
+                paused: false,
+                write_error: None,
+                clock: None,
+                frames: 0,
+            })),
+        };
+        source.start_recording(&path).unwrap();
+        let started = source.inner.lock().unwrap().clock.unwrap().0;
+        let mut command = Command::new("sh");
+        // Five contiguous 20 ms packets become readable together after 100 ms,
+        // as they can when the reader or producer buffers an uninterrupted stream.
+        command.args([
+            "-c",
+            &format!(
+                "sleep 0.1; head -c {} /dev/zero | tr '\\000' '\\001'",
+                CHUNK_BYTES * 5
+            ),
+        ]);
+        capture_command("buffered-fixture", &source.inner, &mut command);
+        let wall_frames = (started.elapsed().as_nanos() * u128::from(RATE) / 1_000_000_000) as u64;
+        let frames = source.inner.lock().unwrap().frames;
+        assert!(
+            frames <= wall_frames + u64::from(RATE / 50),
+            "buffered audio inflated the track: frames={frames}, elapsed_frames={wall_frames}"
+        );
+        assert!(source.stop_recording().is_err()); // Deliberate fixture EOF is reported.
+        let data = std::fs::read(&path).unwrap();
+        let audio_start = data.iter().position(|byte| *byte == 1).unwrap();
+        assert!(
+            data[audio_start..audio_start + CHUNK_BYTES * 5]
+                .iter()
+                .all(|byte| *byte == 1)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
