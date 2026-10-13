@@ -38,6 +38,9 @@ jobs:
         shell: powershell
         run: ./.github/scripts/setup-powershell.ps1
 
+      - name: Test des reprises de téléchargement MSYS2 (sans réseau)
+        run: ./.github/scripts/test-msys2-download-retry.ps1
+
       # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
       # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
       # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
