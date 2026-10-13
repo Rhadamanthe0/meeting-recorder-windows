@@ -1,6 +1,6 @@
 use crate::whisper_grammar::WhisperGrammarElement;
 use crate::whisper_vad::WhisperVadParams;
-use std::ffi::{c_char, c_float, c_int, CString};
+use std::ffi::{c_float, c_int, CString};
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::fmt::Result as FmtResult;
@@ -49,6 +49,8 @@ pub struct FullParams<'a, 'b> {
     grammar: Option<Vec<whisper_rs_sys::whisper_grammar_element>>,
     // Cloned params share the stable CString; the last owner frees it.
     language: Option<Arc<CString>>,
+    initial_prompt: Option<Arc<CString>>,
+    vad_model_path: Option<Arc<CString>>,
     progress_callback_safe: Option<Arc<Box<dyn FnMut(i32)>>>,
     abort_callback_safe: Option<Arc<Box<dyn FnMut() -> bool>>>,
     segment_calllback_safe: Option<Arc<SegmentCallbackFn>>,
@@ -91,6 +93,8 @@ impl<'a, 'b> FullParams<'a, 'b> {
             phantom_tokens: PhantomData,
             grammar: None,
             language: None,
+            initial_prompt: None,
+            vad_model_path: None,
             progress_callback_safe: None,
             abort_callback_safe: None,
             segment_calllback_safe: None,
@@ -814,9 +818,9 @@ impl<'a, 'b> FullParams<'a, 'b> {
     /// // ... further usage of params ...
     /// ```
     pub fn set_initial_prompt(&mut self, initial_prompt: &str) {
-        self.fp.initial_prompt = CString::new(initial_prompt)
-            .expect("Initial prompt contains null byte")
-            .into_raw() as *const c_char;
+        let prompt = Arc::new(CString::new(initial_prompt).expect("Initial prompt contains null byte"));
+        self.fp.initial_prompt = prompt.as_ptr();
+        self.initial_prompt = Some(prompt);
     }
 
     /// Enable or disable VAD.
@@ -836,15 +840,13 @@ impl<'a, 'b> FullParams<'a, 'b> {
     /// # Panics
     /// This method will panic if `vad_model_path` contains a null byte.
     pub fn set_vad_model_path(&mut self, vad_model_path: Option<&str>) {
-        self.fp.vad_model_path = if let Some(vad_model_path) = vad_model_path {
-            CString::new(vad_model_path)
-                .expect("VAD model path contains null byte")
-                .into_raw() as *const c_char
-        } else {
+        let path = vad_model_path
+            .map(|path| Arc::new(CString::new(path).expect("VAD model path contains null byte")));
+        self.fp.vad_model_path = path.as_ref().map_or(std::ptr::null(), |path| path.as_ptr());
+        if path.is_none() {
             self.fp.vad = false;
-
-            std::ptr::null()
-        };
+        }
+        self.vad_model_path = path;
     }
 
     /// Replace the VAD model parameters.

@@ -11,6 +11,13 @@ it. The patch retains the CString in an Arc field: cloned parameters keep the
 same stable C pointer alive, replacing a language releases the previous string,
 and the final owner frees it. The native whisper_full_params ABI is unchanged.
 
+`FullParams::set_initial_prompt` and `FullParams::set_vad_model_path` also
+allocated CStrings with `into_raw`, leaking on replacement or drop. They now
+retain owned, clone-safe `Arc<CString>` values and release them when replaced.
+The same allocation regression test covers language, prompt, and VAD path.
+`WhisperVadContext::new` now passes a borrowed CString pointer to the
+synchronous native initializer instead of leaking one on each invocation.
+
 Regression checks:
 
 ```sh

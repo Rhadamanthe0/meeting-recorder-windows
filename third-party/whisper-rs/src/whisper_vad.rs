@@ -1,5 +1,5 @@
 use crate::WhisperError;
-use std::ffi::{c_char, CString};
+use std::ffi::CString;
 use std::os::raw::c_int;
 use whisper_rs_sys::{
     whisper_vad_context, whisper_vad_context_params, whisper_vad_detect_speech, whisper_vad_free,
@@ -147,11 +147,10 @@ unsafe impl Sync for WhisperVadContext {}
 
 impl WhisperVadContext {
     pub fn new(model_path: &str, params: WhisperVadContextParams) -> Result<Self, WhisperError> {
-        let model_path = CString::new(model_path)
-            .expect("VAD model path contains null byte")
-            .into_raw() as *const c_char;
+        // The native initializer only borrows the NUL-terminated path for this call.
+        let model_path = CString::new(model_path).expect("VAD model path contains null byte");
         let ptr =
-            unsafe { whisper_vad_init_from_file_with_params(model_path, params.into_inner()) };
+            unsafe { whisper_vad_init_from_file_with_params(model_path.as_ptr(), params.into_inner()) };
 
         if ptr.is_null() {
             Err(WhisperError::NullPointer)

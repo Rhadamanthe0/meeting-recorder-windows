@@ -43,7 +43,7 @@ unsafe impl GlobalAlloc for TrackedAllocator {
 static ALLOCATOR: TrackedAllocator = TrackedAllocator;
 
 #[test]
-fn language_storage_is_retained_by_clones_and_freed_after_replacement() {
+fn string_storage_is_retained_by_clones_and_freed_after_replacement() {
     TRACK.with(|track| track.set(true));
     let retained;
     {
@@ -51,14 +51,22 @@ fn language_storage_is_retained_by_clones_and_freed_after_replacement() {
         for _ in 0..100 {
             params.set_language(Some("en"));
             params.set_language(Some("fr"));
+            params.set_initial_prompt("first prompt");
+            params.set_initial_prompt("second prompt");
+            params.set_vad_model_path(Some("first-vad.bin"));
+            params.set_vad_model_path(None);
+            params.set_vad_model_path(Some("second-vad.bin"));
         }
         let cloned = params.clone();
         params.set_language(None);
+        params.set_initial_prompt("replacement");
+        params.set_vad_model_path(None);
+        drop(params);
         retained = LIVE_BYTES.load(Ordering::Relaxed);
         drop(cloned);
     }
     let remaining = LIVE_BYTES.load(Ordering::Relaxed);
     TRACK.with(|track| track.set(false));
-    assert!(retained > 0, "a clone must retain its language storage");
-    assert_eq!(remaining, 0, "language strings leaked after params dropped");
+    assert!(retained > 0, "a clone must retain its string storage");
+    assert_eq!(remaining, 0, "prompt, language, or VAD strings leaked after params dropped");
 }
