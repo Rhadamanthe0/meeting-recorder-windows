@@ -3557,7 +3557,7 @@ impl Recorder {
                 self.toast("A meeting folder with that name already exists");
                 return;
             }
-            if let Err(e) = std::fs::rename(&current, &target) {
+            if let Err(e) = rename_folder_noreplace(&current, &target) {
                 self.toast(&format!("Could not rename the folder: {e}"));
                 return;
             }
@@ -3764,29 +3764,30 @@ fn is_case_only_rename(current: &std::path::Path, target: &std::path::Path) -> b
             .eq_ignore_ascii_case(target.as_os_str().as_encoded_bytes())
 }
 
-fn rollback_folder_rename(
-    current: &std::path::Path,
-    target: &std::path::Path,
+/// Rename a meeting folder without replacing another folder, including when
+/// a concurrent process creates the destination after the existence check.
+fn rename_folder_noreplace(
+    from: &std::path::Path,
+    to: &std::path::Path,
 ) -> std::io::Result<()> {
-    // Another window/process may have claimed the old name meanwhile. Never
-    // replace that folder; keep the current result path and report the failure.
-    if current.exists()
+    // Case-only renames on Windows refer to the same directory and are safe.
+    if to.exists()
         && !matches!(
-            (current.canonicalize(), target.canonicalize()),
-            (Ok(current), Ok(target)) if current == target
+            (from.canonicalize(), to.canonicalize()),
+            (Ok(from), Ok(to)) if from == to
         )
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
-            "the previous meeting folder name is now occupied",
+            "the target meeting folder name is already occupied",
         ));
     }
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStrExt;
-        let from = std::ffi::CString::new(target.as_os_str().as_bytes())?;
-        let to = std::ffi::CString::new(current.as_os_str().as_bytes())?;
-        // SAFETY: both paths remain NUL-terminated and alive for the call.
+        let from = std::ffi::CString::new(from.as_os_str().as_bytes())?;
+        let to = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both path CStrings are NUL-terminated and alive for the call.
         // NOREPLACE also protects a name claimed after the existence check.
         if unsafe {
             libc::renameat2(
@@ -3804,8 +3805,15 @@ fn rollback_folder_rename(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        std::fs::rename(target, current)
+        std::fs::rename(from, to)
     }
+}
+
+fn rollback_folder_rename(
+    current: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    rename_folder_noreplace(target, current)
 }
 
 fn output_dir(started_at: i64, title: &str) -> PathBuf {
@@ -4517,7 +4525,7 @@ mod tests {
             let target = base.join(after);
             std::fs::create_dir(&current).unwrap();
             std::fs::write(current.join("transcript.md"), "original transcript").unwrap();
-            std::fs::rename(&current, &target).unwrap();
+            rename_folder_noreplace(&current, &target).unwrap();
             rollback_folder_rename(&current, &target).unwrap();
             assert_eq!(
                 std::fs::read_to_string(current.join("transcript.md")).unwrap(),
@@ -4553,6 +4561,29 @@ mod tests {
             std::fs::read_to_string(target.join("transcript.md")).unwrap(),
             "meeting transcript"
         );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn forward_title_rename_does_not_replace_an_occupied_folder() {
+        let base = title_test_dir("forward-collision");
+        let current = base.join("original");
+        let target = base.join("renamed");
+        std::fs::create_dir(&current).unwrap();
+        std::fs::write(current.join("transcript.md"), "our meeting").unwrap();
+        // Even an empty target directory belongs to somebody else.
+        std::fs::create_dir(&target).unwrap();
+        assert_eq!(
+            rename_folder_noreplace(&current, &target)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read_to_string(current.join("transcript.md")).unwrap(),
+            "our meeting"
+        );
+        assert!(target.is_dir());
         std::fs::remove_dir_all(base).unwrap();
     }
 
