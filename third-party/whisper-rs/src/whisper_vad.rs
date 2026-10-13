@@ -149,8 +149,9 @@ impl WhisperVadContext {
     pub fn new(model_path: &str, params: WhisperVadContextParams) -> Result<Self, WhisperError> {
         // The native initializer only borrows the NUL-terminated path for this call.
         let model_path = CString::new(model_path).expect("VAD model path contains null byte");
-        let ptr =
-            unsafe { whisper_vad_init_from_file_with_params(model_path.as_ptr(), params.into_inner()) };
+        let ptr = unsafe {
+            whisper_vad_init_from_file_with_params(model_path.as_ptr(), params.into_inner())
+        };
 
         if ptr.is_null() {
             Err(WhisperError::NullPointer)
@@ -165,9 +166,9 @@ impl WhisperVadContext {
     /// This function will exclusively return `WhisperError::GenericError(-1)` on error.
     /// If you've registered logging hooks, they will have much more detailed information.
     pub fn detect_speech(&mut self, samples: &[f32]) -> Result<(), WhisperError> {
-        let (samples, len) = (samples.as_ptr(), samples.len() as c_int);
+        let len = c_int::try_from(samples.len()).map_err(|_| WhisperError::GenericError(-1))?;
 
-        let success = unsafe { whisper_vad_detect_speech(self.ptr, samples, len) };
+        let success = unsafe { whisper_vad_detect_speech(self.ptr, samples.as_ptr(), len) };
 
         if !success {
             Err(WhisperError::GenericError(-1))
@@ -182,6 +183,10 @@ impl WhisperVadContext {
         let prob_count = unsafe { whisper_vad_n_probs(self.ptr) }
             .try_into()
             .expect("n_probs is too large to fit into usize");
+        if prob_count == 0 {
+            return &[];
+        }
+        assert!(!prob_ptr.is_null(), "VAD returned a null probabilities pointer");
         unsafe { core::slice::from_raw_parts(prob_ptr, prob_count) }
     }
 
@@ -212,9 +217,15 @@ impl WhisperVadContext {
         params: WhisperVadParams,
         samples: &[f32],
     ) -> Result<WhisperVadSegments, WhisperError> {
-        let (sample_ptr, sample_len) = (samples.as_ptr(), samples.len() as c_int);
+        let sample_len =
+            c_int::try_from(samples.len()).map_err(|_| WhisperError::GenericError(-1))?;
         let ptr = unsafe {
-            whisper_vad_segments_from_samples(self.ptr, params.into_inner(), sample_ptr, sample_len)
+            whisper_vad_segments_from_samples(
+                self.ptr,
+                params.into_inner(),
+                samples.as_ptr(),
+                sample_len,
+            )
         };
 
         if ptr.is_null() {

@@ -5,7 +5,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use whisper_rs::{FullParams, SamplingStrategy};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperGrammarElement, WhisperGrammarElementType};
 
 thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
@@ -48,6 +48,10 @@ fn string_storage_is_retained_by_clones_and_freed_after_replacement() {
     let retained;
     {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let grammar = [
+            WhisperGrammarElement::new(WhisperGrammarElementType::Character, 'a' as u32),
+            WhisperGrammarElement::new(WhisperGrammarElementType::End, 0),
+        ];
         for _ in 0..100 {
             params.set_language(Some("en"));
             params.set_language(Some("fr"));
@@ -56,11 +60,13 @@ fn string_storage_is_retained_by_clones_and_freed_after_replacement() {
             params.set_vad_model_path(Some("first-vad.bin"));
             params.set_vad_model_path(None);
             params.set_vad_model_path(Some("second-vad.bin"));
+            params.set_grammar(Some(&grammar));
         }
         let cloned = params.clone();
         params.set_language(None);
         params.set_initial_prompt("replacement");
         params.set_vad_model_path(None);
+        params.set_grammar(None);
         drop(params);
         retained = LIVE_BYTES.load(Ordering::Relaxed);
         drop(cloned);
@@ -68,5 +74,5 @@ fn string_storage_is_retained_by_clones_and_freed_after_replacement() {
     let remaining = LIVE_BYTES.load(Ordering::Relaxed);
     TRACK.with(|track| track.set(false));
     assert!(retained > 0, "a clone must retain its string storage");
-    assert_eq!(remaining, 0, "prompt, language, or VAD strings leaked after params dropped");
+    assert_eq!(remaining, 0, "prompt, language, VAD strings or grammar leaked after params dropped");
 }

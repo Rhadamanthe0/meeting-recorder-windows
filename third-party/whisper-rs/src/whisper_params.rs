@@ -46,7 +46,8 @@ pub struct FullParams<'a, 'b> {
     pub(crate) fp: whisper_rs_sys::whisper_full_params,
     phantom_lang: PhantomData<&'a str>,
     phantom_tokens: PhantomData<&'b [c_int]>,
-    grammar: Option<Vec<whisper_rs_sys::whisper_grammar_element>>,
+    // Keep the native pointer valid when FullParams is cloned.
+    grammar: Option<Arc<Vec<whisper_rs_sys::whisper_grammar_element>>>,
     // Cloned params share the stable CString; the last owner frees it.
     language: Option<Arc<CString>>,
     initial_prompt: Option<Arc<CString>>,
@@ -770,7 +771,7 @@ impl<'a, 'b> FullParams<'a, 'b> {
             let grammar_ptr = inner.as_ptr() as *mut _;
             let grammar_len = inner.len();
 
-            self.grammar = Some(inner);
+            self.grammar = Some(Arc::new(inner));
 
             // set the grammar
             self.fp.grammar_rules = grammar_ptr;

@@ -14,9 +14,15 @@ and the final owner frees it. The native whisper_full_params ABI is unchanged.
 `FullParams::set_initial_prompt` and `FullParams::set_vad_model_path` also
 allocated CStrings with `into_raw`, leaking on replacement or drop. They now
 retain owned, clone-safe `Arc<CString>` values and release them when replaced.
-The same allocation regression test covers language, prompt, and VAD path.
+The same allocation regression test covers language, prompt, VAD path, and
+a cloned grammar. Grammar storage also uses `Arc<Vec<_>>`: cloning
+`FullParams` must not leave `fp.grammar_rules` pointing into the old
+owner's freed allocation.
 `WhisperVadContext::new` now passes a borrowed CString pointer to the
 synchronous native initializer instead of leaking one on each invocation.
+VAD sample lengths are now checked before conversion to C `int`, and empty
+probability arrays return an empty Rust slice without constructing a slice
+from a possibly null C pointer.
 
 Regression checks:
 
