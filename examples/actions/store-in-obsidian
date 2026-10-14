@@ -26,8 +26,8 @@ title = os.environ["MEETING_TITLE"]
 date = os.environ["MEETING_DATE"]  # 2026-09-25 14:30
 seconds = int(os.environ.get("MEETING_DURATION", "0"))
 duration = f"{round(seconds / 60)} minutes" if seconds >= 90 else f"{seconds} seconds"
-transcript = Path(os.environ["MEETING_TRANSCRIPT"]).read_text()
-manifest = json.loads(Path(os.environ["MEETING_MANIFEST"]).read_text()) if os.environ.get("MEETING_MANIFEST") else {}
+transcript = Path(os.environ["MEETING_TRANSCRIPT"]).read_text(encoding="utf-8")
+manifest = json.loads(Path(os.environ["MEETING_MANIFEST"]).read_text(encoding="utf-8")) if os.environ.get("MEETING_MANIFEST") else {}
 
 # The people who were given a name; "You", "Remote 2" and "Speaker 1" are not people yet.
 unnamed = re.compile(r"^(You|Remote|Room|Speaker)( \d+)?$")
@@ -55,7 +55,7 @@ if os.environ.get("SUMMARY") == "1":
 
 lines = ["---", f"date: {date[:10]}", "type: meeting", "source: meeting-recorder"]
 if links:
-    lines += ["people:"] + [f'  - "{l}"' for l in links]
+    lines += ["people:"] + [f"  - {json.dumps(link, ensure_ascii=False)}" for link in links]
 lines += ["tags:", "  - meeting", "---", "", f"# {title}", "",
           f"**Date:** {date}", f"**Duration:** {duration}"]
 if links:
@@ -70,7 +70,7 @@ lines += ["", "## Transcript", "", body, ""]
 name = re.sub(r'[\\/:*?"<>|]', "-", f"{date[:10]} {title}")
 note = vault / folder / f"{name}.md"
 note.parent.mkdir(parents=True, exist_ok=True)
-note.write_text("\n".join(lines))
+note.write_text("\n".join(lines), encoding="utf-8")
 
 link = "obsidian://open?" + urllib.parse.urlencode({"vault": vault.name, "file": f"{folder}/{name}"},
                                                     quote_via=urllib.parse.quote)

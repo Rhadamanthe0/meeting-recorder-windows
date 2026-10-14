@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 //! Capture WASAPI : micro (`@DEFAULT_SOURCE@`) + loopback système
-//! (`@DEFAULT_MONITOR@`), via la crate `wasapi` 0.24 déclarée
+//! (`@DEFAULT_MONITOR@`), via la crate `wasapi` 0.25 déclarée
 //! (crate `windows` moderne, métadonnées embarquées, pas de winmd à fournir).
 //!
 //! Même contrat que `super::linux` : un thread par `Source`, chunks de
@@ -33,6 +33,8 @@ const FALLBACK_PERIOD_HNS: i64 = 200_000; // 20 ms
 struct Inner {
     levels: VecDeque<f32>,
     file: Option<BufWriter<File>>,
+    /// Identifies the recording for sync operations completed off the lock.
+    recording: u64,
     /// While paused the meters keep running but nothing is written.
     paused: bool,
     /// Last init failure step (`None` while capturing fine): polled by the UI
@@ -53,6 +55,12 @@ struct Inner {
 fn note_write_error(inner: &mut Inner, context: &str, message: String) {
     if inner.write_error.is_none() {
         inner.write_error = Some(format!("{context}: {message}"));
+    }
+}
+
+fn note_sync_error(inner: &mut Inner, recording: u64, message: String) {
+    if inner.recording == recording && inner.file.is_some() {
+        note_write_error(inner, "sync", message);
     }
 }
 
@@ -138,6 +146,7 @@ impl Source {
         let inner = Arc::new(Mutex::new(Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
+            recording: 0,
             paused: false,
             error: None,
             write_error: None,
@@ -146,7 +155,13 @@ impl Source {
         }));
         let shared = inner.clone();
         thread::spawn(move || {
-            endpoint_loop(device, &shared);
+            if cfg!(feature = "ci-audio") {
+                let weak = Arc::downgrade(&shared);
+                drop(shared);
+                synthetic_loop(device, weak);
+            } else {
+                endpoint_loop(device, &shared);
+            }
         });
         Source { inner }
     }
@@ -156,6 +171,7 @@ impl Source {
         let file = BufWriter::new(File::create(path)?);
         let mut inner = self.inner.lock().unwrap();
         inner.file = Some(file);
+        inner.recording = inner.recording.wrapping_add(1);
         inner.paused = false;
         inner.write_error = None;
         Ok(())
@@ -166,8 +182,10 @@ impl Source {
     }
 
     pub fn stop_recording(&self) -> std::io::Result<()> {
-        let write_error = self.inner.lock().unwrap().write_error.take();
-        let file = self.inner.lock().unwrap().file.take();
+        let (write_error, file) = {
+            let mut inner = self.inner.lock().unwrap();
+            (inner.write_error.take(), inner.file.take())
+        };
         // Flush + sync HORS verrou (guards droppés) : les vumètres ne
         // bloquent jamais sur le disque.
         let mut error = write_error;
@@ -180,7 +198,7 @@ impl Source {
             }
         }
         match error {
-            Some(message) => Err(std::io::Error::new(std::io::ErrorKind::Other, message)),
+            Some(message) => Err(std::io::Error::other(message)),
             None => Ok(()),
         }
     }
@@ -218,6 +236,58 @@ impl Source {
     /// Clone sous mutex, jamais de bloc.
     pub fn endpoint(&self) -> Option<CapturedEndpoint> {
         self.inner.lock().unwrap().endpoint.clone()
+    }
+}
+
+/// A fake endpoint for CI. Its samples are generated here, never read from
+/// WASAPI, a default device, saved settings, or an environment-supplied device.
+fn synthetic_loop(device: &str, weak: std::sync::Weak<Mutex<Inner>>) {
+    let frequency = if device == "@DEFAULT_MONITOR@" {
+        880.0
+    } else {
+        440.0
+    };
+    let Some(shared) = weak.upgrade() else { return };
+    shared.lock().unwrap().endpoint = Some(CapturedEndpoint {
+        id: format!("synthetic:{}", tag(device)),
+        friendlyname: format!("Synthetic {frequency} Hz"),
+        direction: expected_dir(device).to_string(),
+        role: "test".into(),
+        state: "active".into(),
+    });
+    drop(shared);
+    let mut converter = Converter {
+        desc: MixDesc {
+            rate: 44_100,
+            channels: 1,
+            channel_mask: 0x4, // SPEAKER_FRONT_CENTER (mono).
+            kind: SampleKind::F32,
+            blockalign: 4,
+            valid: true,
+        },
+        pos: 0.0,
+    };
+    let mut frame = 0u64;
+    let mut converted = Vec::new();
+    let mut chunks = 0;
+    while let Some(shared) = weak.upgrade() {
+        let packet: Vec<u8> = (0..882)
+            .flat_map(|_| {
+                let sample = (std::f64::consts::TAU * frequency * frame as f64 / 44_100.0).sin()
+                    as f32
+                    * 0.25;
+                frame += 1;
+                sample.to_le_bytes()
+            })
+            .collect();
+        converter.push_packet(&packet, &mut converted);
+        let ready = converted.len() / CHUNK_BYTES * CHUNK_BYTES;
+        for chunk in converted[..ready].as_chunks::<CHUNK_BYTES>().0 {
+            push_chunk(&shared, chunk, &mut chunks);
+        }
+        converted.drain(..ready);
+        drop(shared);
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -304,6 +374,7 @@ enum SampleKind {
 struct MixDesc {
     rate: u32,
     channels: usize,
+    channel_mask: u32,
     kind: SampleKind,
     blockalign: usize,
     /// Faux pour un format exotique (ex. float 64 bits) : on émet des zéros.
@@ -314,6 +385,15 @@ impl MixDesc {
     fn from_mix(mix: &WaveFormat) -> Self {
         let rate = mix.get_samplespersec().max(1);
         let channels = (mix.get_nchannels() as usize).max(1);
+        let mask = mix.get_dwchannelmask();
+        let channel_mask = if mask.count_ones() as usize == channels {
+            mask
+        } else {
+            wasapi::make_channelmasks(channels)
+                .first()
+                .copied()
+                .unwrap_or(0)
+        };
         let bits = mix.get_bitspersample();
         let mut blockalign = mix.get_blockalign() as usize;
         if blockalign == 0 {
@@ -339,6 +419,7 @@ impl MixDesc {
         MixDesc {
             rate,
             channels,
+            channel_mask,
             kind,
             blockalign,
             valid,
@@ -411,10 +492,26 @@ fn pad_missed(device: &str, shared: &Mutex<Inner>, chunks: &mut u64) {
     }
 }
 
-fn downmix_samples(native: &[f32; 8]) -> (f32, f32) {
+fn downmix_samples(channels: usize, mask: u32, sample: impl Fn(usize) -> f32) -> (f32, f32) {
     const CENTER: f32 = 0.707;
-    let left = native[0] + CENTER * native[2] + CENTER * native[4] + CENTER * native[6];
-    let right = native[1] + CENTER * native[2] + CENTER * native[5] + CENTER * native[7];
+    let mut positions = (0..32).filter(|bit| mask & (1u32 << bit) != 0);
+    let (mut left, mut right) = (0.0f32, 0.0f32);
+    for channel in 0..channels {
+        // WAVEFORMATEXTENSIBLE orders channels by increasing mask bit.
+        // Missing/unnamed positions contribute to both sides rather than
+        // silently losing a channel. Only an actual LFE is omitted.
+        let (l, r) = match positions.next().unwrap_or(2) {
+            0 => (1.0, 0.0), // Front left.
+            1 => (0.0, 1.0), // Front right.
+            3 => (0.0, 0.0), // LFE.
+            4 | 6 | 9 | 12 | 15 => (CENTER, 0.0),
+            5 | 7 | 10 | 14 | 17 => (0.0, CENTER),
+            _ => (CENTER, CENTER), // Center/back-center/height/unknown.
+        };
+        let value = sample(channel);
+        left += l * value;
+        right += r * value;
+    }
     let peak = left.abs().max(right.abs()).max(1.0);
     (
         (left / peak).clamp(-1.0, 1.0),
@@ -425,16 +522,13 @@ fn downmix_samples(native: &[f32; 8]) -> (f32, f32) {
 /// Convertit des paquets natifs vers s16le 48 kHz stéréo (resample linéaire
 /// simple, sans dépendance supplémentaire).
 ///
-/// Mapping des canaux natifs (ordre WAVEFORMATEXTENSIBLE) :
+/// Mapping des canaux natifs selon le masque WAVEFORMATEXTENSIBLE :
 /// - 1 canal : mono dupliqué sur L/R ;
-/// - 2 canaux : stéréo direct (FL/FR) ;
-/// - 6 canaux (5.1 : FL FR FC LFE BL BR) et 8 canaux (7.1 : +SL SR) :
-///   downmix via [`downmix_samples`] (centre et surrounds à 0.707 des deux
-///   côtés, canal 3 LFE ignoré, normalisation anti-saturation) ;
-/// - 3, 4, 5, 7 canaux ou plus de 8 : repli raisonnable, les 8 premiers
-///   canaux dans le même mapping (le canal 3 reste ignoré comme un LFE).
-/// Limite connue : en quad (4 canaux : FL FR BL BR), les indices 2/3 ne sont
-/// pas un centre/LFE mais sont mixés comme tels.
+/// - 2 canaux FL/FR : stéréo direct ;
+/// - autres layouts : downmix via [`downmix_samples`] (centre/surrounds à 0.707,
+///   seul le LFE est ignoré, normalisation anti-saturation) ;
+/// - masque absent/incohérent : layout standard WASAPI pour ce nombre de
+///   canaux, puis contribution centrale pour les positions non nommées.
 struct Converter {
     desc: MixDesc,
     /// Retard fractionnaire (en frames source) reporté au paquet suivant,
@@ -462,11 +556,8 @@ impl Converter {
             }
             let frac = (src - i0 as f64) as f32;
             let i1 = (i0 + 1).min(frames_in - 1);
-            // Échantillon natif interpolé par canal (canal 3 = LFE : zéros).
+            // Échantillon natif interpolé ; le masque identifie le LFE.
             let sample = |channel: usize| {
-                if channel == 3 {
-                    return 0.0;
-                }
                 let a = frame_channel_f32(raw, i0, channel, &self.desc);
                 let b = frame_channel_f32(raw, i1, channel, &self.desc);
                 (a + (b - a) * frac).clamp(-1.0, 1.0)
@@ -475,16 +566,11 @@ impl Converter {
                 // Mono dupliqué.
                 let v = sample(0);
                 (v, v)
-            } else if channels == 2 {
-                // Stéréo direct.
+            } else if channels == 2 && self.desc.channel_mask == 0x3 {
+                // Stéréo direct seulement pour Front Left / Front Right.
                 (sample(0), sample(1))
             } else {
-                // 5.1/7.1 (et repli au-delà) : downmix centro-surrounds.
-                let mut native = [0.0f32; 8];
-                for (i, v) in native.iter_mut().enumerate().take(channels.min(8)) {
-                    *v = sample(i);
-                }
-                downmix_samples(&native)
+                downmix_samples(channels, self.desc.channel_mask, sample)
             };
             for v in [left, right] {
                 let s = (v * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
@@ -531,10 +617,10 @@ fn push_chunk(shared: &Mutex<Inner>, chunk: &[u8], chunks: &mut u64) {
         }
         // Comme sur Linux : au plus une seconde perdue en cas de crash,
         // sync disque toutes les 30 s.
-        if chunks.is_multiple_of(50) {
-            if let Err(e) = file.flush() {
-                note_write_error(&mut inner, "flush", e.to_string());
-            }
+        if chunks.is_multiple_of(50)
+            && let Err(e) = file.flush()
+        {
+            note_write_error(&mut inner, "flush", e.to_string());
         }
     }
     // Sync disque HORS verrou via un clone du File.
@@ -546,11 +632,12 @@ fn push_chunk(shared: &Mutex<Inner>, chunk: &[u8], chunks: &mut u64) {
     } else {
         None
     };
+    let recording = inner.recording;
     drop(inner);
-    if let Some(file) = sync_clone {
-        if let Err(e) = file.sync_data() {
-            note_write_error(&mut shared.lock().unwrap(), "sync", e.to_string());
-        }
+    if let Some(file) = sync_clone
+        && let Err(e) = file.sync_data()
+    {
+        note_sync_error(&mut shared.lock().unwrap(), recording, e.to_string());
     }
 }
 
@@ -698,13 +785,21 @@ fn open_target(
         .get_state()
         .map(|s| s.to_string())
         .unwrap_or_else(|_| "unknown".to_owned());
-    shared.lock().unwrap().endpoint = Some(CapturedEndpoint {
+    let endpoint = CapturedEndpoint {
         id: id.clone().unwrap_or_default(),
         friendlyname: friendly,
         direction,
         role,
         state,
-    });
+    };
+    debug_log(
+        device,
+        &format!(
+            "endpoint direction={} role={} state={}",
+            endpoint.direction, endpoint.role, endpoint.state
+        ),
+    );
+    shared.lock().unwrap().endpoint = Some(endpoint);
     let mut client = match dev.get_iaudioclient() {
         Ok(client) => client,
         Err(_) => {
@@ -959,6 +1054,65 @@ pub fn to_meter(peak: f32) -> f64 {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "ci-audio")]
+    #[test]
+    fn synthetic_endpoint_records_pauses_and_releases_without_wasapi() {
+        let source = Source::spawn("@DEFAULT_SOURCE@");
+        let weak = Arc::downgrade(&source.inner);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while source.recent_peak(HISTORY) < 0.2 {
+            assert!(Instant::now() < deadline, "synthetic input did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(source.endpoint().unwrap().id, "synthetic:mic");
+        assert!(source.init_error().is_none());
+        let path = std::env::temp_dir().join(format!("mr-synthetic-{}.raw", std::process::id()));
+        source.start_recording(&path).unwrap();
+        let length = || {
+            let inner = source.inner.lock().unwrap();
+            let file = inner.file.as_ref().unwrap();
+            file.get_ref().metadata().unwrap().len() + file.buffer().len() as u64
+        };
+        while length() < CHUNK_BYTES as u64 * 3 {
+            assert!(
+                Instant::now() < deadline,
+                "synthetic recording did not advance"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        source.set_paused(true);
+        let before = length();
+        thread::sleep(Duration::from_millis(80));
+        assert_eq!(length(), before, "paused input wrote samples");
+        source.set_paused(false);
+        while length() <= before {
+            assert!(
+                Instant::now() < deadline,
+                "resumed recording did not advance"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        source.stop_recording().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len() % CHUNK_BYTES, 0);
+        assert!(
+            bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|s| i16::from_le_bytes(*s).unsigned_abs() > 6000)
+        );
+        std::fs::remove_file(path).unwrap();
+        drop(source);
+        while weak.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "synthetic input retained the closed source"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn late_wakeups_pad_every_missed_chunk() {
         assert_eq!(missed_chunks(Duration::from_millis(0)), 0);
@@ -966,7 +1120,7 @@ mod tests {
         assert_eq!(missed_chunks(Duration::from_millis(20)), 1);
         assert_eq!(missed_chunks(Duration::from_millis(45)), 2);
         assert_eq!(missed_chunks(Duration::from_millis(1000)), 50);
-        assert!(MAX_PAD_BURST == 1500);
+        const { assert!(MAX_PAD_BURST == 1500) };
     }
 
     #[test]
@@ -974,6 +1128,7 @@ mod tests {
         let mut inner = Inner {
             levels: VecDeque::from(vec![0.0; HISTORY]),
             file: None,
+            recording: 0,
             paused: false,
             error: None,
             write_error: None,
@@ -983,28 +1138,106 @@ mod tests {
         note_write_error(&mut inner, "write", "disk full".to_owned());
         note_write_error(&mut inner, "flush", "later failure".to_owned());
         assert_eq!(inner.write_error.as_deref(), Some("write: disk full"));
+        inner.write_error = None;
+        inner.recording = 1;
+        let path = std::env::temp_dir().join(format!("mr-windows-sync-{}", std::process::id()));
+        inner.file = Some(BufWriter::new(File::create(&path).unwrap()));
+        note_sync_error(&mut inner, 0, "old failure".into());
+        assert!(inner.write_error.is_none());
+        note_sync_error(&mut inner, 1, "current failure".into());
+        assert_eq!(inner.write_error.as_deref(), Some("sync: current failure"));
+        inner.file.take();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn center_voice_survives_the_downmix() {
-        let (left, right) = downmix_samples(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let (left, right) =
+            downmix_samples(8, 0x63f, |i| [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0][i]);
         assert!(left > 0.5 && right > 0.5);
         assert!((left - right).abs() < 0.01);
     }
 
     #[test]
     fn front_left_and_surround_reach_their_side() {
-        let (left, right) = downmix_samples(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let (left, right) =
+            downmix_samples(8, 0x63f, |i| [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0][i]);
         assert!(left > 0.9 && right.abs() < 0.01);
-        let (left, right) = downmix_samples(&[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        let (left, right) =
+            downmix_samples(8, 0x63f, |i| [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0][i]);
         assert!(left > 0.5);
         assert!(left > right);
     }
 
     #[test]
     fn full_scale_on_every_channel_does_not_clip() {
-        let (left, right) = downmix_samples(&[-1.0; 8]);
+        let (left, right) = downmix_samples(8, 0x63f, |_| -1.0);
         assert!(left.abs() <= 1.0 && right.abs() <= 1.0);
+    }
+
+    #[test]
+    fn two_channel_layout_uses_the_declared_speaker_positions() {
+        let convert = |mask, samples: [f32; 2]| {
+            let raw: Vec<u8> = samples.into_iter().flat_map(f32::to_le_bytes).collect();
+            let mut converter = Converter {
+                desc: MixDesc {
+                    rate: RATE,
+                    channels: 2,
+                    channel_mask: mask,
+                    kind: SampleKind::F32,
+                    blockalign: 8,
+                    valid: true,
+                },
+                pos: 0.0,
+            };
+            let mut bytes = Vec::new();
+            converter.push_packet(&raw, &mut bytes);
+            assert_eq!(bytes.len(), 4);
+            (
+                i16::from_le_bytes([bytes[0], bytes[1]]),
+                i16::from_le_bytes([bytes[2], bytes[3]]),
+            )
+        };
+        assert_eq!(convert(0x3, [0.5, -0.5]), (16_384, -16_384)); // FL FR.
+        let (left, right) = convert(0xc, [0.5, 0.0]); // FC LFE.
+        assert!(left > 10_000);
+        assert_eq!(left, right, "center voice must reach both sides");
+        assert_eq!(convert(0xc, [0.0, 0.5]), (0, 0)); // Only the LFE.
+    }
+
+    #[test]
+    fn four_channel_layout_keeps_rear_audio_and_omits_only_lfe() {
+        let raw: Vec<u8> = [0.0f32, 0.0, 0.0, 0.5]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let convert = |mask| {
+            let mut converter = Converter {
+                desc: MixDesc {
+                    rate: RATE,
+                    channels: 4,
+                    channel_mask: mask,
+                    kind: SampleKind::F32,
+                    blockalign: 16,
+                    valid: true,
+                },
+                pos: 0.0,
+            };
+            let mut bytes = Vec::new();
+            converter.push_packet(&raw, &mut bytes);
+            assert_eq!(bytes.len(), 4);
+            (
+                i16::from_le_bytes([bytes[0], bytes[1]]),
+                i16::from_le_bytes([bytes[2], bytes[3]]),
+            )
+        };
+        let (left, right) = convert(0x33); // FL FR BL BR (quad).
+        assert_eq!(left, 0);
+        assert!(right > 10_000, "rear-right audio was lost");
+        let (left, right) = convert(0x107); // FL FR FC BC (surround).
+        assert!(left > 10_000);
+        assert_eq!(left, right);
+        assert_eq!(convert(0xf), (0, 0)); // FL FR FC LFE (3.1).
     }
 
     #[test]
@@ -1013,6 +1246,7 @@ mod tests {
         let desc = MixDesc {
             rate: RATE,
             channels: 6,
+            channel_mask: 0x3f, // 5.1 : FL FR FC LFE BL BR.
             kind: SampleKind::I16,
             blockalign: 12,
             valid: true,

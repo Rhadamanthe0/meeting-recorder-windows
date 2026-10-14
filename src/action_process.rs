@@ -1,7 +1,47 @@
-//! Confinement d'une action et de tous les processus qu'elle lance.
+//! Confinement des actions et des outils audio, avec leurs descendants.
 
 use std::io;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+
+/// Runs a tool in the same containment as actions and playback decoders.
+pub(super) fn status(command: &mut Command) -> io::Result<ExitStatus> {
+    let mut process = ActionProcess::spawn(command)?;
+    process.child.wait()
+}
+
+/// Drains both pipes concurrently, then closes the process group/job before
+/// joining the readers: a descendant must not keep a finished tool's pipes open.
+pub(super) fn output(command: &mut Command) -> io::Result<Output> {
+    use std::io::Read;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut process = ActionProcess::spawn(command)?;
+    let mut stdout = process.child.stdout.take().expect("piped stdout");
+    let mut stderr = process.child.stderr.take().expect("piped stderr");
+    let stdout = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let status = process.child.wait();
+    process.terminate();
+    let stdout = stdout
+        .join()
+        .map_err(|_| io::Error::other("stdout reader panicked"));
+    let stderr = stderr
+        .join()
+        .map_err(|_| io::Error::other("stderr reader panicked"));
+    Ok(Output {
+        status: status?,
+        stdout: stdout??,
+        stderr: stderr??,
+    })
+}
 
 pub(super) struct ActionProcess {
     pub child: Child,
@@ -51,6 +91,37 @@ impl Drop for ActionProcess {
     }
 }
 
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn output_drains_both_pipes_and_preserves_status() {
+        let result = output(Command::new("sh").args([
+            "-c",
+            "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2; exit 7",
+        ]))
+        .unwrap();
+        assert_eq!(result.status.code(), Some(7));
+        assert_eq!(result.stdout.len(), 131072);
+        assert_eq!(result.stderr.len(), 131072);
+    }
+
+    #[test]
+    fn output_closes_pipes_held_by_a_finished_tools_descendant() {
+        let start = Instant::now();
+        let result = output(
+            Command::new("sh").args(["-c", "sleep 30 & printf ready; printf diagnostic >&2"]),
+        )
+        .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"ready");
+        assert_eq!(result.stderr, b"diagnostic");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -70,6 +141,11 @@ mod windows {
     };
 
     pub(super) struct Job(HANDLE);
+
+    // SAFETY: a job handle belongs to the process, not to the creating thread.
+    // Moving the sole owner transfers responsibility for closing it; methods
+    // that terminate or close the handle still require exclusive access.
+    unsafe impl Send for Job {}
 
     impl Job {
         fn new() -> io::Result<Self> {

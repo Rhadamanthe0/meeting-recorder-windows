@@ -1,11 +1,10 @@
 //! Transcription after the meeting, in-process with whisper.cpp (whisper-rs).
 //!
-//! Both tracks are mixed and transcribed in one pass, so there is one timeline
-//! and nothing to merge. The speaker of every phrase is then read off the two
-//! tracks, like whisper.cpp's `--diarize`: where the mic carries more energy it
-//! is "You", where the computer audio does it is "Remote". Echo of the other
-//! side in the mic (no headset) is always quieter than the original, so it does
-//! not turn into a line of its own.
+//! Each recorded track is transcribed separately, then the sentences are
+//! interleaved on the original timeline. Nemotron distinguishes voices on
+//! each side; level, overlap and repeated-text checks suppress computer audio
+//! leaking into the microphone. Imports use one transcription with speaker
+//! turns from the same diarization model.
 
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
@@ -44,8 +43,8 @@ pub enum Event {
     Progress(f64),
     /// A freshly transcribed line.
     Segment(String),
-    /// Always the last event. whisper-rs leaks the boxed callbacks that hold a
-    /// sender, so the channel never closes on its own; wait for this instead.
+    /// Always the last event: reporting ends explicitly before the caller
+    /// handles the final result.
     Finished,
 }
 
@@ -54,6 +53,21 @@ pub type Events = async_channel::Sender<Event>;
 pub type Abort = Arc<AtomicBool>;
 
 pub const CANCELLED: &str = "transcription cancelled";
+
+fn validate_language(language: &str) -> Result<(), String> {
+    if language == "auto"
+        || (0..=whisper_rs::get_lang_max_id()).any(|id| {
+            whisper_rs::get_lang_str(id) == Some(language)
+                || whisper_rs::get_lang_str_full(id) == Some(language)
+        })
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown transcription language {language:?}; use auto or a Whisper language code"
+        ))
+    }
+}
 
 /// Only one heavy job (transcription, diarization) runs at a time: whisper
 /// and the speaker model each take most of the CPU and memory.
@@ -134,31 +148,32 @@ pub fn load_track(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn decode_raw_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let output = crate::platform::silent_command(crate::export::ffmpeg())
-        .args([
-            "-nostdin",
-            "-loglevel",
-            "error",
-            "-f",
-            "s16le",
-            "-ar",
-            &RATE.to_string(),
-            "-ac",
-            &CHANNELS.to_string(),
-            "-i",
-        ])
-        .arg(path)
-        .args([
-            "-f",
-            "f32le",
-            "-ac",
-            "1",
-            "-ar",
-            &WHISPER_RATE.to_string(),
-            "-",
-        ])
-        .output()
-        .map_err(|e| format!("could not run ffmpeg: {e}"))?;
+    let output = crate::action_process::output(
+        crate::platform::silent_command(crate::export::ffmpeg())
+            .args([
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "s16le",
+                "-ar",
+                &RATE.to_string(),
+                "-ac",
+                &CHANNELS.to_string(),
+                "-i",
+            ])
+            .arg(path)
+            .args([
+                "-f",
+                "f32le",
+                "-ac",
+                "1",
+                "-ar",
+                &WHISPER_RATE.to_string(),
+                "-",
+            ]),
+    )
+    .map_err(|e| format!("could not run ffmpeg: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "ffmpeg could not decode {}: {}",
@@ -176,20 +191,21 @@ fn decode_raw_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn decode_with_ffmpeg(path: &Path) -> Result<Vec<f32>, String> {
-    let output = crate::platform::silent_command(crate::export::ffmpeg())
-        .args(["-nostdin", "-loglevel", "error", "-i"])
-        .arg(path)
-        .args([
-            "-f",
-            "f32le",
-            "-ac",
-            "1",
-            "-ar",
-            &WHISPER_RATE.to_string(),
-            "-",
-        ])
-        .output()
-        .map_err(|e| format!("could not run ffmpeg: {e}"))?;
+    let output = crate::action_process::output(
+        crate::platform::silent_command(crate::export::ffmpeg())
+            .args(["-nostdin", "-loglevel", "error", "-i"])
+            .arg(path)
+            .args([
+                "-f",
+                "f32le",
+                "-ac",
+                "1",
+                "-ar",
+                &WHISPER_RATE.to_string(),
+                "-",
+            ]),
+    )
+    .map_err(|e| format!("could not run ffmpeg: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "ffmpeg could not decode {}: {}",
@@ -558,64 +574,75 @@ pub fn download(
     ));
     emit(events, Event::Stage(label.to_owned()));
 
+    if abort.load(Ordering::Relaxed) {
+        return Err(CANCELLED.into());
+    }
     let response = ureq::get(url)
+        .config()
+        .timeout_connect(Some(std::time::Duration::from_secs(30)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(30)))
+        // Models can exceed a gigabyte; bound stalled transfers while
+        // allowing a slow connection to finish a normal download.
+        .timeout_global(Some(std::time::Duration::from_secs(2 * 3600)))
+        .build()
         .call()
         .map_err(|e| format!("could not download {url}: {e}"))?;
     let total = response.body().content_length();
     let mut reader = response.into_body().into_reader();
-    let mut file = BufWriter::new(
-        File::options()
-            .write(true)
-            .create_new(true)
-            .open(&part)
-            .map_err(|e| e.to_string())?,
-    );
-    let mut buf = vec![0u8; 1 << 16];
-    let (mut done, mut last_pct) = (0u64, u64::MAX);
-    loop {
-        if abort.load(Ordering::Relaxed) {
-            drop(file);
-            let _ = std::fs::remove_file(&part);
-            return Err(CANCELLED.into());
-        }
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("download interrupted: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        if let Some(total) = total.filter(|t| *t > 0) {
-            let pct = done * 100 / total;
-            if pct != last_pct {
-                last_pct = pct;
-                emit(events, Event::Stage(format!("{label} {pct}%")));
-                emit(events, Event::Progress(done as f64 / total as f64));
+    let file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .map_err(|e| e.to_string())?;
+    // Cleanup also covers read/write/flush errors, after the file handle has
+    // been closed (required on Windows).
+    let result = (|| {
+        let mut file = BufWriter::new(file);
+        let mut buf = vec![0u8; 1 << 16];
+        let (mut done, mut last_pct) = (0u64, u64::MAX);
+        loop {
+            if abort.load(Ordering::Relaxed) {
+                return Err(CANCELLED.into());
+            }
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("download interrupted: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            done += n as u64;
+            if let Some(total) = total.filter(|t| *t > 0) {
+                let pct = done * 100 / total;
+                if pct != last_pct {
+                    last_pct = pct;
+                    emit(events, Event::Stage(format!("{label} {pct}%")));
+                    emit(events, Event::Progress(done as f64 / total as f64));
+                }
             }
         }
-    }
-    file.flush().map_err(|e| e.to_string())?;
-    file.get_ref().sync_data().map_err(|e| e.to_string())?;
-    drop(file);
-    if total.is_some_and(|t| t != done) || done < min_bytes {
-        let _ = std::fs::remove_file(&part);
-        if valid(target) {
-            // Another downloader filled the target in the meantime.
-            return Ok(());
-        }
-        return Err(format!("the download of {url} was incomplete"));
-    }
-    match std::fs::rename(&part, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&part);
+        file.flush().map_err(|e| e.to_string())?;
+        file.get_ref().sync_data().map_err(|e| e.to_string())?;
+        drop(file);
+        if total.is_some_and(|t| t != done) || done < min_bytes {
             if valid(target) {
+                // Another downloader filled the target in the meantime.
                 return Ok(());
             }
-            Err(e.to_string())
+            return Err(format!("the download of {url} was incomplete"));
         }
-    }
+        match std::fs::rename(&part, target) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if valid(target) {
+                    return Ok(());
+                }
+                Err(e.to_string())
+            }
+        }
+    })();
+    let _ = std::fs::remove_file(&part);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +656,7 @@ pub fn transcribe(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    validate_language(language)?;
     let _slot = acquire_heavy_slot(events, abort)?;
     let duration_secs = (mic.len().max(computer.len()) / WHISPER_RATE) as i64;
     let empty = |language: &str| Transcript {
@@ -922,6 +950,7 @@ pub fn transcribe_single(
     events: &Events,
     abort: &Abort,
 ) -> Result<Transcript, String> {
+    validate_language(language)?;
     let _slot = acquire_heavy_slot(events, abort)?;
     let duration_secs = (track.len() / WHISPER_RATE) as i64;
     let empty = || Transcript {
@@ -966,8 +995,7 @@ pub fn transcribe_single(
         language,
         duration_secs,
         diarization_failed,
-        events,
-        abort,
+        (events, abort),
     )
 }
 
@@ -979,9 +1007,9 @@ fn whisper_pass(
     language: &str,
     duration_secs: i64,
     diarization_failed: bool,
-    events: &Events,
-    abort: &Abort,
+    reporting: (&Events, &Abort),
 ) -> Result<Transcript, String> {
+    let (events, abort) = reporting;
     let context = load_whisper(events, abort)?;
     let (segments, detected) = side_pass(
         &context,
@@ -1065,6 +1093,94 @@ struct Word {
     segment: usize,
 }
 
+/// Owned for one synchronous `WhisperState::full` call. The dependency's safe
+/// callback setters leak their boxes; use its raw setters with this scoped
+/// owner instead. Callbacks only read it, including the worker-thread abort.
+struct WhisperCallbacks {
+    events: Events,
+    abort: Abort,
+    progress: (f64, f64),
+    map: Vec<(usize, Region)>,
+    speakers: Speakers,
+}
+
+impl WhisperCallbacks {
+    /// # Safety
+    /// This owner must stay at its current address until the synchronous full
+    /// call returns. Do not retain or reuse params after dropping the owner.
+    unsafe fn install(&self, params: &mut FullParams<'_, '_>) {
+        let data = self as *const Self as *mut std::ffi::c_void;
+        // SAFETY: the caller retains the owner for the entire call; all three
+        // trampolines use shared access and no callback mutates the owner.
+        unsafe {
+            params.set_progress_callback(Some(whisper_progress));
+            params.set_progress_callback_user_data(data);
+            params.set_new_segment_callback(Some(whisper_segment));
+            params.set_new_segment_callback_user_data(data);
+            params.set_abort_callback(Some(whisper_abort));
+            params.set_abort_callback_user_data(data);
+        }
+    }
+}
+
+unsafe extern "C" fn whisper_progress(
+    _: *mut whisper_rs::WhisperSysContext,
+    _: *mut whisper_rs::WhisperSysState,
+    pct: i32,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: install passes the live, immutably accessed callback owner.
+    let callbacks = unsafe { &*(data as *const WhisperCallbacks) };
+    let pct = f64::from(pct.clamp(0, 100)) / 100.0;
+    emit(
+        &callbacks.events,
+        Event::Progress(callbacks.progress.0 + (callbacks.progress.1 - callbacks.progress.0) * pct),
+    );
+}
+
+unsafe extern "C" fn whisper_abort(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: install passes the live owner; AtomicBool permits worker reads.
+    unsafe { &*(data as *const WhisperCallbacks) }
+        .abort
+        .load(Ordering::Relaxed)
+}
+
+unsafe extern "C" fn whisper_segment(
+    _: *mut whisper_rs::WhisperSysContext,
+    state: *mut whisper_rs::WhisperSysState,
+    added: i32,
+    data: *mut std::ffi::c_void,
+) {
+    use whisper_rs::whisper_rs_sys as sys;
+    // SAFETY: Whisper invokes this synchronously with its live state and the
+    // callback owner installed above. Segment indices come from that state.
+    let callbacks = unsafe { &*(data as *const WhisperCallbacks) };
+    let count = unsafe { sys::whisper_full_n_segments_from_state(state) };
+    for index in (count - added).max(0)..count {
+        let text = unsafe { sys::whisper_full_get_segment_text_from_state(state, index) };
+        if text.is_null() {
+            continue;
+        }
+        // SAFETY: a segment's text is a NUL-terminated string owned by state.
+        let Ok(text) = unsafe { std::ffi::CStr::from_ptr(text) }.to_str() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || is_noise_marker(text) {
+            continue;
+        }
+        let start = unsafe { sys::whisper_full_get_segment_t0_from_state(state, index) };
+        let end = unsafe { sys::whisper_full_get_segment_t1_from_state(state, index) };
+        let (start, _) = locate(&callbacks.map, start * 10);
+        let (end, _) = locate(&callbacks.map, end * 10);
+        let speaker = callbacks.speakers.speaker(start, end);
+        emit(
+            &callbacks.events,
+            Event::Segment(format!("{speaker}: {text}")),
+        );
+    }
+}
+
 fn run_whisper(
     context: &WhisperContext,
     glued: &Glued,
@@ -1090,41 +1206,18 @@ fn run_whisper(
     params.set_token_timestamps(true);
     params.set_split_on_word(true);
 
-    let progress_events = events.clone();
-    params.set_progress_callback_safe(move |pct: i32| {
-        let pct = f64::from(pct.clamp(0, 100)) / 100.0;
-        emit(
-            &progress_events,
-            Event::Progress(progress.0 + (progress.1 - progress.0) * pct),
-        );
+    let callbacks = Box::new(WhisperCallbacks {
+        events: events.clone(),
+        abort: abort.clone(),
+        progress,
+        map: glued.map.clone(),
+        speakers: speakers.clone(),
     });
-
-    // Live lines for the animation, with the speaker already worked out.
-    let segment_events = events.clone();
-    let map = glued.map.clone();
-    let live_speakers = speakers.clone();
-    params.set_segment_callback_safe(move |data: whisper_rs::SegmentCallbackData| {
-        let text = data.text.trim();
-        if text.is_empty() || is_noise_marker(text) {
-            return;
-        }
-        let (start, _) = locate(&map, data.start_timestamp * 10);
-        let (end, _) = locate(&map, data.end_timestamp * 10);
-        let speaker = live_speakers.speaker(start, end);
-        emit(
-            &segment_events,
-            Event::Segment(format!("{speaker}: {text}")),
-        );
-    });
-
-    // Passed as a boxed trait object on purpose: whisper-rs 0.16 casts the user
-    // data back to `F`, which only matches what it stored when F is this Box.
-    let abort_flag = abort.clone();
-    let should_abort: Box<dyn FnMut() -> bool> =
-        Box::new(move || abort_flag.load(Ordering::Relaxed));
-    params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(should_abort));
-
+    // SAFETY: the box has a stable address, full is synchronous, and params is
+    // consumed by it. The owner remains alive until every callback finishes.
+    unsafe { callbacks.install(&mut params) };
     let result = state.full(params, &glued.samples);
+    drop(callbacks);
     if abort.load(Ordering::Relaxed) {
         return Err(CANCELLED.into());
     }
@@ -1482,7 +1575,7 @@ pub fn cli(args: &[String]) -> glib::ExitCode {
     let [mic_path, computer_path] = files.as_slice() else {
         return usage();
     };
-    run_cli(|events, abort| {
+    run_cli(&language, |events, abort| {
         let mic = load_track(mic_path)?;
         let computer = load_track(computer_path)?;
         transcribe(&mic, &computer, &language, events, abort)
@@ -1506,7 +1599,7 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
                 None => return usage(),
             },
             "--speakers" | "-s" => match iter.next().and_then(|n| n.parse::<usize>().ok()) {
-                Some(n) if n > 0 => speakers = Some(n),
+                Some(n) if (1..=8).contains(&n) => speakers = Some(n),
                 _ => return usage(),
             },
             _ => files.push(PathBuf::from(arg)),
@@ -1515,7 +1608,7 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
     let [path] = files.as_slice() else {
         return usage();
     };
-    run_cli(|events, abort| {
+    run_cli(&language, |events, abort| {
         let track = load_track(path)?;
         transcribe_single(&track, &language, speakers, events, abort)
     })
@@ -1523,7 +1616,14 @@ pub fn cli_file(args: &[String]) -> glib::ExitCode {
 
 /// Runs a transcription for the command line: progress and live lines on
 /// stderr, the Markdown on stdout.
-fn run_cli(work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>) -> glib::ExitCode {
+fn run_cli(
+    language: &str,
+    work: impl FnOnce(&Events, &Abort) -> Result<Transcript, String>,
+) -> glib::ExitCode {
+    if let Err(message) = validate_language(language) {
+        eprintln!("{APP_NAME}: {message}");
+        return glib::ExitCode::from(2);
+    }
     let (tx, rx) = async_channel::unbounded();
     let started = Instant::now();
     let reporter = std::thread::spawn(move || {
@@ -1583,6 +1683,97 @@ fn usage() -> glib::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_languages_are_rejected_before_audio_loading_or_transcription() {
+        for id in 0..=whisper_rs::get_lang_max_id() {
+            assert!(validate_language(whisper_rs::get_lang_str(id).unwrap()).is_ok());
+            assert!(validate_language(whisper_rs::get_lang_str_full(id).unwrap()).is_ok());
+        }
+        assert!(validate_language("auto").is_ok());
+        let (events, receiver) = async_channel::unbounded();
+        let abort = Abort::default();
+        for language in ["invalid-language", "", "fr\0", "日本語"] {
+            assert!(transcribe(&[], &[], language, &events, &abort).is_err());
+            assert!(transcribe_single(&[], language, None, &events, &abort).is_err());
+            let called = std::cell::Cell::new(false);
+            let exit = run_cli(language, |_, _| {
+                called.set(true);
+                Err("the audio must not be loaded".into())
+            });
+            assert_eq!(exit, glib::ExitCode::from(2));
+            assert!(!called.get());
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn whisper_callbacks_release_their_data_and_keep_progress_and_abort_behavior() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<WhisperCallbacks>();
+        for cancelled in [false, true] {
+            for _ in 0..20 {
+                let (events, receiver) = async_channel::unbounded();
+                let abort = Arc::new(AtomicBool::new(cancelled));
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                let callbacks = Box::new(WhisperCallbacks {
+                    events: events.clone(),
+                    abort: abort.clone(),
+                    progress: (0.25, 0.75),
+                    map: Vec::new(),
+                    speakers: Speakers::Turns(Vec::new()),
+                });
+                // SAFETY: keep the stable owner alive for every invocation;
+                // progress/abort do not use the null context/state arguments.
+                unsafe {
+                    callbacks.install(&mut params);
+                    let data = &*callbacks as *const WhisperCallbacks as *mut std::ffi::c_void;
+                    whisper_progress(std::ptr::null_mut(), std::ptr::null_mut(), 50, data);
+                    assert_eq!(whisper_abort(data), cancelled);
+                }
+                assert!(matches!(receiver.try_recv().unwrap(), Event::Progress(p) if p == 0.5));
+                drop(params);
+                drop(callbacks);
+                assert_eq!(Arc::strong_count(&abort), 1);
+                drop(events);
+                // A leaked callback retains a sender even after params drops.
+                assert!(receiver.is_closed());
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_download_removes_its_partial_file() {
+        use std::net::TcpListener;
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut client, _) = server.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = client.read(&mut request);
+            client
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\npartial")
+                .unwrap();
+        });
+        let dir =
+            std::env::temp_dir().join(format!("mr-interrupted-download-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, _rx) = async_channel::unbounded();
+        assert!(
+            download(
+                &url,
+                &dir.join("model.bin"),
+                "Test",
+                100,
+                &events,
+                &Abort::default()
+            )
+            .is_err()
+        );
+        worker.join().unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir(&dir).unwrap();
+    }
 
     fn line(start_ms: i64, speaker: &str, text: &str) -> Segment {
         Segment {

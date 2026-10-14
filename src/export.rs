@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::action_process;
 use crate::audio::{CHANNELS, RATE};
 use crate::platform::silent_command;
 
@@ -249,12 +250,13 @@ pub fn export_audio(mic_raw: &Path, system_raw: &Path, out: &Path, format: Forma
     };
 
     jobs.iter().all(|args| {
-        silent_command(ffmpeg())
-            .args(["-y", "-loglevel", "error"])
-            .args(args)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        action_process::status(
+            silent_command(ffmpeg())
+                .args(["-y", "-loglevel", "error"])
+                .args(args),
+        )
+        .map(|s| s.success())
+        .unwrap_or(false)
     })
 }
 
@@ -278,25 +280,26 @@ pub fn export_tracks(mic_raw: &Path, system_raw: &Path, meeting_dir: &Path) -> b
     [(mic_raw, mic), (system_raw, computer)]
         .iter()
         .all(|(raw, target)| {
-            silent_command(ffmpeg())
-                .args([
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "s16le",
-                    "-ar",
-                    &rate,
-                    "-ac",
-                    &channels,
-                    "-i",
-                ])
-                .arg(raw)
-                .args(["-ac", "1", "-c:a", "libopus", "-b:a", "48k"])
-                .arg(target)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            action_process::status(
+                silent_command(ffmpeg())
+                    .args([
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "s16le",
+                        "-ar",
+                        &rate,
+                        "-ac",
+                        &channels,
+                        "-i",
+                    ])
+                    .arg(raw)
+                    .args(["-ac", "1", "-c:a", "libopus", "-b:a", "48k"])
+                    .arg(target),
+            )
+            .map(|s| s.success())
+            .unwrap_or(false)
         })
 }
 
@@ -323,12 +326,13 @@ mod tests {
     }
 
     fn mean_db(path: &Path) -> f64 {
-        let out = silent_command(ffmpeg())
-            .args(["-hide_banner", "-i"])
-            .arg(path)
-            .args(["-af", "volumedetect", "-f", "null", "-"])
-            .output()
-            .unwrap();
+        let out = action_process::output(
+            silent_command(ffmpeg())
+                .args(["-hide_banner", "-i"])
+                .arg(path)
+                .args(["-af", "volumedetect", "-f", "null", "-"]),
+        )
+        .unwrap();
         let text = String::from_utf8_lossy(&out.stderr);
         let at = text.find("mean_volume: ").unwrap() + "mean_volume: ".len();
         text[at..]
