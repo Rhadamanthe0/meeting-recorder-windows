@@ -3766,10 +3766,7 @@ fn is_case_only_rename(current: &std::path::Path, target: &std::path::Path) -> b
 
 /// Rename a meeting folder without replacing another folder, including when
 /// a concurrent process creates the destination after the existence check.
-fn rename_folder_noreplace(
-    from: &std::path::Path,
-    to: &std::path::Path,
-) -> std::io::Result<()> {
+fn rename_folder_noreplace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     // Case-only renames on Windows refer to the same directory and are safe.
     if to.exists()
         && !matches!(

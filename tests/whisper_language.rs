@@ -74,5 +74,8 @@ fn string_storage_is_retained_by_clones_and_freed_after_replacement() {
     let remaining = LIVE_BYTES.load(Ordering::Relaxed);
     TRACK.with(|track| track.set(false));
     assert!(retained > 0, "a clone must retain its string storage");
-    assert_eq!(remaining, 0, "prompt, language, VAD strings or grammar leaked after params dropped");
+    assert_eq!(
+        remaining, 0,
+        "prompt, language, VAD strings or grammar leaked after params dropped"
+    );
 }
