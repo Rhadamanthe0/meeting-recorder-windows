@@ -431,6 +431,8 @@ jobs:
       # Le diagnostic des DLL installées doit aussi disposer d'objdump après
       # déplacement sur la machine jetable, sans dépendre du PATH du PC.
       - name: Outil de vérification des imports MSI
+        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
+        if: ${{ !cancelled() }}
         id: msi-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -439,6 +441,8 @@ jobs:
           msystem: UCRT64
           install: mingw-w64-ucrt-x86_64-binutils
       - name: Download MSI construit
+        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
+        if: ${{ !cancelled() }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
@@ -448,6 +452,8 @@ jobs:
       # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
+        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
+        if: ${{ !cancelled() }}
         env:
           UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
