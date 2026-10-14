@@ -474,8 +474,9 @@ jobs:
           msystem: UCRT64
           install: mingw-w64-ucrt-x86_64-binutils
       - name: Download MSI construit
-        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
-        if: ${{ !cancelled() }}
+        id: msi-download
+        # Indépendant du GUI, mais dépend bien de la préparation MSI.
+        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
@@ -485,8 +486,8 @@ jobs:
       # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
-        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
-        if: ${{ !cancelled() }}
+        # Un échec GUI n'empêche pas MSI ; les prérequis MSI doivent avoir réussi.
+        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' && steps.msi-download.outcome == 'success' }}
         env:
           UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
