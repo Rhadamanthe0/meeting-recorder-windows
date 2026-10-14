@@ -60,6 +60,14 @@ jobs:
       - name: Affiche la toolchain (hôte GNU attendu)
         run: rustc -vV
 
+      # Renouveler la clé chaque semaine : un cache immuable de GitHub ne
+      # peut pas s'enrichir après les compilations d'un job déjà restauré.
+      - name: Période du cache Rust
+        run: |
+          $today = [DateTime]::UtcNow.Date
+          $monday = $today.AddDays(-(([int]$today.DayOfWeek + 6) % 7))
+          "RUST_CACHE_WEEK=$($monday.ToString('yyyyMMdd'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -70,6 +78,7 @@ jobs:
           # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
           cache-bin: false
           prefix-key: v1-gnu-no-proxies
+          key: windows-gnu-week-${{ env.RUST_CACHE_WEEK }}
 
       - name: Vérifie GNU après restauration du cache
         run: |
@@ -82,7 +91,30 @@ jobs:
             }
           }
 
+      # Une référence qcow2 scellée peut déjà contenir GTK4 et libadwaita.
+      # Ancienne référence : installation temporaire inchangée, jamais de succès fictif.
+      - name: Vérifie la pile GTK préinstallée
+        id: base-gtk
+        run: |
+          $root = 'C:\msys64'
+          $bin = Join-Path $root 'ucrt64\bin'
+          $tools = @('pkgconf.exe', 'gcc.exe', 'clang.exe', 'cmake.exe')
+          $ready = Test-Path -LiteralPath (Join-Path $root 'usr\bin\bash.exe')
+          foreach ($tool in $tools) {
+            if (-not (Test-Path -LiteralPath (Join-Path $bin $tool))) { $ready = $false }
+          }
+          if ($ready) {
+            $pkgconf = Join-Path $bin 'pkgconf.exe'
+            foreach ($package in @('gtk4', 'libadwaita-1')) {
+              & $pkgconf --modversion $package
+              if ($LASTEXITCODE -ne 0) { throw "Pile GTK préinstallée invalide : $package" }
+            }
+            "root=$root" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Install GTK4 (MSYS2 UCRT64)
+        if: steps.base-gtk.outputs.ready != 'true'
         id: msys2-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -95,8 +127,9 @@ jobs:
           cache: false
 
       - name: Met à jour MSYS2 et installe GTK sans arrêt global de processus
+        if: steps.base-gtk.outputs.ready != 'true'
         env:
-          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+          MSYS2_ROOT: ${{ steps.base-gtk.outputs.root || steps.msys2-tools.outputs.msys2-location }}
         run: ./.github/scripts/install-msys2-packages.ps1 -Root $env:MSYS2_ROOT
 
       # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
@@ -129,7 +162,7 @@ jobs:
       # Expose pkg-config + gcc UCRT64 au build cargo (hôte GNU par défaut).
       - name: Expose GTK au build GNU
         env:
-          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+          MSYS2_ROOT: ${{ steps.base-gtk.outputs.root || steps.msys2-tools.outputs.msys2-location }}
         run: |
           # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
           Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
