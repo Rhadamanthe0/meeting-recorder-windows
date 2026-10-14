@@ -104,6 +104,7 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $bin $tool))) { $ready = $false }
           }
           if ($ready) {
+            $env:PKG_CONFIG_PATH = "$root\ucrt64\lib\pkgconfig;$root\ucrt64\share\pkgconfig"
             $pkgconf = Join-Path $bin 'pkgconf.exe'
             foreach ($package in @('gtk4', 'libadwaita-1')) {
               & $pkgconf --modversion $package
