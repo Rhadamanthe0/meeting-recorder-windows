@@ -48,7 +48,35 @@ jobs:
       # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
       # libadwaita MinGW depuis MSVC) :
       #   toolchain: stable / targets: x86_64-pc-windows-msvc
+      # Une référence immuable prééquipée (rhada-pc #37) fournit déjà Rust.
+      # Sans celle-ci, le même téléchargement dtolnay reste obligatoire.
+      - name: Vérifie Rust GNU préinstallé
+        id: base-rust
+        run: |
+          $home = 'C:\RhadaCI\tools\rust'
+          $cargoHome = Join-Path $home 'cargo'
+          $rustupHome = Join-Path $home 'rustup'
+          $rustup = Join-Path $cargoHome 'bin\rustup.exe'
+          $ready = Test-Path -LiteralPath $rustup -PathType Leaf
+          if ($ready) {
+            $env:CARGO_HOME = $cargoHome
+            $env:RUSTUP_HOME = $rustupHome
+            $rustInfo = & $rustup run $env:RUSTUP_TOOLCHAIN rustc -vV
+            if ($LASTEXITCODE -ne 0 -or -not ($rustInfo | Where-Object { $_ -eq 'host: x86_64-pc-windows-gnu' })) {
+              throw 'La toolchain GNU scellée est invalide.'
+            }
+            & $rustup run $env:RUSTUP_TOOLCHAIN cargo clippy --version
+            if ($LASTEXITCODE -ne 0) { throw 'Clippy scellé absent.' }
+            & $rustup run $env:RUSTUP_TOOLCHAIN rustfmt --version
+            if ($LASTEXITCODE -ne 0) { throw 'Rustfmt scellé absent.' }
+            "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "RUSTUP_HOME=$rustupHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            (Join-Path $cargoHome 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Install Rust stable GNU
+        if: steps.base-rust.outputs.ready != 'true'
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable-x86_64-pc-windows-gnu
