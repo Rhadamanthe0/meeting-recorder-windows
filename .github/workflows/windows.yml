@@ -1,8 +1,11 @@
 name: windows
 
 # Build Windows : toolchain GNU alignée sur les libs GTK MinGW (UCRT64).
+# Les commits de branches avec PR sont verifies une seule fois via pull_request.
+# Les pushes sur master restent testes ; les branches sans PR utilisent workflow_dispatch.
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
