@@ -16,7 +16,9 @@ use std::cell::{Cell, RefCell};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
+#[cfg(target_os = "linux")]
+use std::process::{Child, Command};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +36,8 @@ use std::process::ChildStdout;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
+#[cfg(target_os = "windows")]
+use crate::action_process::ActionProcess;
 use crate::export;
 use crate::platform::silent_command;
 
@@ -42,6 +46,7 @@ const MIC_COLOR: (f64, f64, f64) = (0.21, 0.52, 0.89);
 const SYSTEM_COLOR: (f64, f64, f64) = (0.90, 0.38, 0.0);
 
 type PositionCallback = Rc<RefCell<Option<Box<dyn Fn(i64)>>>>;
+type ErrorCallback = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
 /// A running `ffmpeg | pacat` pipeline, stopped when dropped.
 #[cfg(target_os = "linux")]
@@ -139,22 +144,23 @@ fn die_with_parent(command: &mut Command) -> &mut Command {
 /// Length of an audio file in microseconds, from ffprobe.
 #[cfg(target_os = "linux")]
 fn probe_duration_us(path: &Path) -> i64 {
-    Command::new(export::ffprobe())
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(path)
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|text| text.trim().parse::<f64>().ok())
-        .map(|secs| (secs * 1_000_000.0) as i64)
-        .unwrap_or(0)
+    crate::action_process::output(
+        Command::new(export::ffprobe())
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path),
+    )
+    .ok()
+    .and_then(|out| String::from_utf8(out.stdout).ok())
+    .and_then(|text| text.trim().parse::<f64>().ok())
+    .map(|secs| (secs * 1_000_000.0) as i64)
+    .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +174,9 @@ fn probe_duration_us(path: &Path) -> i64 {
 #[cfg(target_os = "windows")]
 struct Playback {
     /// Kept alive for the whole playback; dropping it ends the sound.
-    _stream: OutputStream,
+    _stream: Option<OutputStream>,
+    /// The CI sink advances through decoded samples without opening an endpoint.
+    silent_output: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     sinks: Vec<Sink>,
     started: Instant,
     from_us: i64,
@@ -179,6 +187,40 @@ impl Playback {
     /// Opens the output device and plays already prepared `sources`.
     /// Runs on the UI thread: only fast calls remain here.
     fn assemble(sources: Vec<TrackSource>, from_us: i64) -> Option<Playback> {
+        if sources.is_empty() {
+            return None;
+        }
+        if cfg!(feature = "ci-audio") {
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let mut sinks = Vec::with_capacity(sources.len());
+            for source in sources {
+                let (sink, mut output) = Sink::new_idle();
+                match source {
+                    TrackSource::Ffmpeg(source) => sink.append(source),
+                    TrackSource::File(source) => sink.append(*source),
+                }
+                let active = running.clone();
+                std::thread::spawn(move || {
+                    while active.load(std::sync::atomic::Ordering::Relaxed) {
+                        let count = output.sample_rate() as usize * output.channels() as usize / 50;
+                        for _ in 0..count {
+                            if output.next().is_none() {
+                                return;
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                });
+                sinks.push(sink);
+            }
+            return Some(Playback {
+                _stream: None,
+                silent_output: Some(running),
+                sinks,
+                started: Instant::now(),
+                from_us,
+            });
+        }
         let (_stream, handle) = OutputStream::try_default().ok()?;
         let mut sinks = Vec::with_capacity(sources.len());
         for source in sources {
@@ -187,7 +229,7 @@ impl Playback {
             };
             match source {
                 TrackSource::Ffmpeg(source) => sink.append(source),
-                TrackSource::File(source) => sink.append(source),
+                TrackSource::File(source) => sink.append(*source),
             }
             sinks.push(sink);
         }
@@ -195,7 +237,8 @@ impl Playback {
             return None;
         }
         Some(Playback {
-            _stream,
+            _stream: Some(_stream),
+            silent_output: None,
             sinks,
             started: Instant::now(),
             from_us,
@@ -214,23 +257,17 @@ impl Playback {
 #[cfg(target_os = "windows")]
 impl Drop for Playback {
     fn drop(&mut self) {
+        if let Some(running) = &self.silent_output {
+            running.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         // Stop the sinks first so the ffmpeg children owned by their sources
         // are reaped promptly then; dropping `_stream` closes the device.
-        // A hard crash may still leak `ffmpeg.exe`: there is no Job Object
-        // yet (see `die_with_parent`).
+        // Each ffmpeg source also owns a kill-on-close Job Object, so a
+        // process crash cannot leave playback decoders running.
         for sink in &self.sinks {
             sink.stop();
         }
     }
-}
-
-/// No-op on Windows: there is no `prctl`/`PDEATHSIG`. Kept so the spawn
-/// sites read the same on both OSes; the ffmpeg children below are killed in
-/// `Drop` (`kill` + `wait`) instead. No Job Object yet: a crash between
-/// spawn and drop can leave `ffmpeg.exe` running.
-#[cfg(target_os = "windows")]
-fn die_with_parent(command: &mut Command) -> &mut Command {
-    command
 }
 
 /// One track ready to play, built off the UI thread.
@@ -243,7 +280,7 @@ fn die_with_parent(command: &mut Command) -> &mut Command {
 #[cfg(target_os = "windows")]
 enum TrackSource {
     Ffmpeg(FfmpegPcm),
-    File(rodio::source::SkipDuration<Decoder<BufReader<File>>>),
+    File(Box<rodio::source::SkipDuration<Decoder<BufReader<File>>>>),
 }
 
 /// Builds every playable track's source: the blocking half of starting
@@ -268,9 +305,9 @@ fn prepare_sources(files: &[PathBuf], from_us: i64) -> Vec<TrackSource> {
             let Ok(decoder) = Decoder::new(BufReader::new(opened)) else {
                 continue;
             };
-            sources.push(TrackSource::File(
+            sources.push(TrackSource::File(Box::new(
                 decoder.skip_duration(Duration::from_micros(from_us.max(0) as u64)),
-            ));
+            )));
         }
     }
     sources
@@ -282,13 +319,14 @@ fn prepare_sources(files: &[PathBuf], from_us: i64) -> Vec<TrackSource> {
 /// files directly.
 #[cfg(target_os = "windows")]
 fn have_ffmpeg() -> bool {
-    silent_command(export::ffmpeg())
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    crate::action_process::status(
+        silent_command(export::ffmpeg())
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .map(|status| status.success())
+    .unwrap_or(false)
 }
 
 /// Raw s16le 48 kHz stereo frames streaming from
@@ -298,7 +336,7 @@ fn have_ffmpeg() -> bool {
 #[cfg(target_os = "windows")]
 struct FfmpegPcm {
     pipe: BufReader<ChildStdout>,
-    child: Child,
+    process: ActionProcess,
 }
 
 #[cfg(target_os = "windows")]
@@ -312,11 +350,11 @@ impl FfmpegPcm {
             .args(["-f", "s16le", "-ar", "48000", "-ac", "2", "-"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = die_with_parent(&mut command).spawn().ok()?;
-        let out = child.stdout.take()?;
+        let mut process = ActionProcess::spawn(&mut command).ok()?;
+        let out = process.child.stdout.take()?;
         Some(FfmpegPcm {
             pipe: BufReader::new(out),
-            child,
+            process,
         })
     }
 }
@@ -354,8 +392,7 @@ impl rodio::Source for FfmpegPcm {
 #[cfg(target_os = "windows")]
 impl Drop for FfmpegPcm {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.process.terminate();
     }
 }
 
@@ -374,30 +411,28 @@ fn probe_duration_us(path: &Path) -> i64 {
 
 #[cfg(target_os = "windows")]
 fn probe_with_ffprobe(path: &Path) -> Option<i64> {
-    silent_command(export::ffprobe())
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(path)
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|text| text.trim().parse::<f64>().ok())
-        .map(|secs| (secs * 1_000_000.0) as i64)
+    crate::action_process::output(
+        silent_command(export::ffprobe())
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path),
+    )
+    .ok()
+    .and_then(|out| String::from_utf8(out.stdout).ok())
+    .and_then(|text| text.trim().parse::<f64>().ok())
+    .map(|secs| (secs * 1_000_000.0) as i64)
 }
 
 #[cfg(target_os = "windows")]
 fn probe_with_ffmpeg(path: &Path) -> Option<i64> {
-    let out = silent_command(export::ffmpeg())
-        .arg("-i")
-        .arg(path)
-        .output()
-        .ok()?;
+    let out =
+        crate::action_process::output(silent_command(export::ffmpeg()).arg("-i").arg(path)).ok()?;
     parse_ffmpeg_duration(&out.stderr)
 }
 
@@ -461,7 +496,7 @@ pub struct Player {
     on_position: PositionCallback,
     /// Called once when playback fails to start (no device, no decodable
     /// track), so the UI can say so instead of silently flipping back to Play.
-    on_error: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_error: ErrorCallback,
     ticking: Rc<Cell<bool>>,
 }
 
@@ -503,21 +538,33 @@ impl Player {
             ticking: Rc::default(),
         };
 
-        let this = player.clone();
+        let weak = player.downgrade();
         player.wave.set_draw_func(move |_, cr, width, height| {
-            this.draw(cr, f64::from(width), f64::from(height));
+            if let Some(this) = weak() {
+                this.draw(cr, f64::from(width), f64::from(height));
+            }
         });
 
-        let this = player.clone();
-        player.button.connect_clicked(move |_| this.toggle());
+        let weak = player.downgrade();
+        player.button.connect_clicked(move |_| {
+            if let Some(this) = weak() {
+                this.toggle();
+            }
+        });
 
         // Click or drag anywhere on the waveform to seek.
         let drag = gtk::GestureDrag::new();
-        let this = player.clone();
-        drag.connect_drag_begin(move |_, x, _| this.seek_to_x(x));
-        let this = player.clone();
+        let weak = player.downgrade();
+        drag.connect_drag_begin(move |_, x, _| {
+            if let Some(this) = weak() {
+                this.seek_to_x(x);
+            }
+        });
+        let weak = player.downgrade();
         drag.connect_drag_update(move |gesture, dx, _| {
-            if let Some((x, _)) = gesture.start_point() {
+            if let Some(this) = weak()
+                && let Some((x, _)) = gesture.start_point()
+            {
                 this.seek_to_x(x + dx);
             }
         });
@@ -525,11 +572,11 @@ impl Player {
 
         // Hovering a chapter marker shows its title.
         player.wave.set_has_tooltip(true);
-        let this = player.clone();
+        let weak = player.downgrade();
         player
             .wave
             .connect_query_tooltip(move |_, x, _, _, tooltip| {
-                match this.chapter_near(f64::from(x)) {
+                match weak().and_then(|this| this.chapter_near(f64::from(x))) {
                     Some(title) => {
                         tooltip.set_text(Some(&title));
                         true
@@ -539,6 +586,35 @@ impl Player {
             });
 
         player
+    }
+
+    // Widget callbacks must not own the player containing those widgets:
+    // that cycle used to retain every closed meeting and its audio sources.
+    fn downgrade(&self) -> impl Fn() -> Option<Self> + Clone + use<> {
+        let (root, button, wave, time) = (
+            self.root.downgrade(),
+            self.button.downgrade(),
+            self.wave.downgrade(),
+            self.time.downgrade(),
+        );
+        let (state, on_position, on_error, ticking) = (
+            Rc::downgrade(&self.state),
+            Rc::downgrade(&self.on_position),
+            Rc::downgrade(&self.on_error),
+            Rc::downgrade(&self.ticking),
+        );
+        move || {
+            Some(Self {
+                root: root.upgrade()?,
+                button: button.upgrade()?,
+                wave: wave.upgrade()?,
+                time: time.upgrade()?,
+                state: state.upgrade()?,
+                on_position: on_position.upgrade()?,
+                on_error: on_error.upgrade()?,
+                ticking: ticking.upgrade()?,
+            })
+        }
     }
 
     pub fn widget(&self) -> &gtk::Box {
@@ -638,7 +714,7 @@ impl Player {
             .borrow()
             .chapters
             .iter()
-            .map(|(ms, title)| ((*ms * 1000) as f64 / duration as f64 * width, title))
+            .map(|(ms, title)| (*ms as f64 * 1000.0 / duration as f64 * width, title))
             .filter(|(at, _)| (at - x).abs() <= 6.0)
             .min_by(|a, b| (a.0 - x).abs().total_cmp(&(b.0 - x).abs()))
             .map(|(_, title)| title.clone())
@@ -802,7 +878,7 @@ impl Player {
 
     /// Jumps to `ms` and plays from there, for a click on the transcript.
     pub fn play_from(&self, ms: i64) {
-        self.state.borrow_mut().paused_at_us = (ms * 1000).max(0);
+        self.state.borrow_mut().paused_at_us = ms.saturating_mul(1000).max(0);
         self.play();
     }
 
@@ -920,7 +996,7 @@ impl Player {
         if duration > 0 {
             // Chapter markers: a thin line with a small notch at the top.
             for (ms, _) in &state.chapters {
-                let x = ((*ms * 1000) as f64 / duration as f64 * width).round() + 0.5;
+                let x = (*ms as f64 * 1000.0 / duration as f64 * width).round() + 0.5;
                 cr.set_source_rgba(ir, ig, ib, 0.35);
                 cr.rectangle(x - 0.5, 0.0, 1.0, height);
                 let _ = cr.fill();
@@ -941,12 +1017,13 @@ impl Player {
 /// Decodes `path` at a low rate and keeps the loudest sample per bin, scaled
 /// to 0..1 with a gentle curve so quiet speech still shows.
 fn peaks(path: &Path) -> Option<Vec<f32>> {
-    let output = silent_command(export::ffmpeg())
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-ac", "1", "-ar", "4000", "-f", "s16le", "-"])
-        .output()
-        .ok()?;
+    let output = crate::action_process::output(
+        silent_command(export::ffmpeg())
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-ac", "1", "-ar", "4000", "-f", "s16le", "-"]),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -982,6 +1059,57 @@ fn clock(secs: i64) -> String {
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
     use super::*;
+
+    #[cfg(feature = "ci-audio")]
+    #[test]
+    fn synthetic_output_decodes_and_finishes_without_opening_hardware() {
+        let dir = std::env::temp_dir().join(format!("mr-ci-playback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.wav");
+        let result = crate::action_process::status(
+            silent_command(export::ffmpeg())
+                .args([
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=660:duration=0.2",
+                ])
+                .arg(&path),
+        )
+        .unwrap();
+        assert!(result.success());
+        let mut sources = prepare_sources(std::slice::from_ref(&path), 0);
+        let fallback = Decoder::new(BufReader::new(File::open(&path).unwrap())).unwrap();
+        sources.push(TrackSource::File(Box::new(
+            fallback.skip_duration(Duration::ZERO),
+        )));
+        let mut playback = Playback::assemble(sources, 0).expect("synthetic output opens");
+        assert!(
+            playback._stream.is_none(),
+            "a hardware output stream was opened"
+        );
+        assert_eq!(playback.sinks.len(), 2, "tracks must play concurrently");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !playback.ended() {
+            assert!(
+                Instant::now() < deadline,
+                "synthetic playback did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(playback);
+        while let Err(error) = std::fs::remove_dir_all(&dir) {
+            assert!(
+                Instant::now() < deadline,
+                "decoder retained its input: {error}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn ffmpeg_duration_line_parses() {

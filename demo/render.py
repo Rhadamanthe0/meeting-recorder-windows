@@ -25,7 +25,7 @@ VOICES = {"M": "en_US-amy-medium.onnx", "T": "en_US-ryan-medium.onnx"}
 
 def synth(model: Path, text: str, out: Path) -> array.array:
     subprocess.run(
-        ["piper-tts", "--model", str(model), "--output_file", str(out)],
+        [sys.executable, "-m", "piper", "--model", str(model), "--output_file", str(out)],
         input=text.encode(),
         check=True,
         capture_output=True,

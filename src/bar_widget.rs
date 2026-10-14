@@ -5,7 +5,9 @@
 //! business writing in a home directory. So the app asks, and on a yes links
 //! the widget there and puts it on the right of the bar.
 
+#[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
+#[cfg(any(not(target_os = "windows"), test))]
 use std::time::Duration;
 
 #[cfg(not(target_os = "windows"))]
@@ -16,6 +18,7 @@ use crate::platform;
 #[cfg(not(target_os = "windows"))]
 use crate::settings;
 
+#[cfg(any(not(target_os = "windows"), test))]
 const ID: &str = "jankeesvw.meeting-recorder";
 
 #[cfg(not(target_os = "windows"))]
@@ -52,6 +55,7 @@ pub fn should_offer() -> bool {
 }
 
 /// Whether the shell has the widget on the bar; None when the shell does not answer.
+#[cfg(any(not(target_os = "windows"), test))]
 fn enabled(mut run: impl FnMut(&str, &[&str]) -> Result<String, String>) -> Option<bool> {
     let output = run("omarchy-shell", &["shell", "listPlugins"]).ok()?;
     let plugins: Vec<serde_json::Value> = serde_json::from_str(&output).ok()?;
@@ -60,6 +64,7 @@ fn enabled(mut run: impl FnMut(&str, &[&str]) -> Result<String, String>) -> Opti
     }))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
     let output = crate::platform::silent_command(program)
         .args(args)
@@ -97,6 +102,7 @@ pub fn add() -> Result<(), String> {
     Err("the bar widget is only available on Omarchy".into())
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn enable(
     mut run: impl FnMut(&str, &[&str]) -> Result<String, String>,
     mut sleep: impl FnMut(Duration),
@@ -136,6 +142,7 @@ fn enable(
 
 /// Whether the widget shows up on the bar within ten seconds or so. In #12 it
 /// was there about four seconds after the enable gave up.
+#[cfg(any(not(target_os = "windows"), test))]
 fn reached_the_bar(
     mut run: impl FnMut(&str, &[&str]) -> Result<String, String>,
     mut sleep: impl FnMut(Duration),

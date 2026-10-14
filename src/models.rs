@@ -103,17 +103,21 @@ pub fn configured() -> String {
     }
     std::fs::read_to_string(config_file())
         .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "model").then(|| {
-                    let value = value.split('#').next().unwrap_or("");
-                    value.trim().trim_matches('"').to_owned()
-                })
-            })
-        })
+        .and_then(|text| config_value(&text, "model"))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| DEFAULT.to_owned())
+}
+
+/// Root-level scalar settings only: keys inside an action or another table
+/// must not override the app's model or LLM. Preserve # inside quoted paths.
+pub(crate) fn config_value(text: &str, wanted: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with('['))
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == wanted)
+        .map(|(_, value)| crate::actions::unquote(value.trim()))
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn known(name: &str) -> Option<&'static Model> {
@@ -198,6 +202,23 @@ pub fn dtw_preset() -> Option<DtwModelPreset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_config_keeps_quoted_paths_and_ignores_table_keys() {
+        assert_eq!(
+            config_value("model = 'C:\\Models\\call#1.bin' # comment", "model"),
+            Some("C:\\Models\\call#1.bin".into())
+        );
+        assert_eq!(
+            config_value(r#"model = "C:\\Models\\small.bin""#, "model"),
+            Some("C:\\Models\\small.bin".into())
+        );
+        assert_eq!(config_value("[[action]]\nmodel = 'bad'", "model"), None);
+        assert_eq!(
+            config_value("model = 'small'\n[[action]]\nmodel = 'bad'", "model"),
+            Some("small".into())
+        );
+    }
 
     #[test]
     fn names_and_file_names_both_resolve() {

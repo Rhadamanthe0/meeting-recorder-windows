@@ -6,21 +6,21 @@
    "speaker": "You",
    "side": "mic",
    "start": 0.5,
-   "end": 5.6,
+   "end": 5.35,
    "text": "Okay, I think everyone is here. This is the release call for the new theme picker."
   },
   {
    "speaker": "Anna",
    "side": "computer",
    "start": 6.2,
-   "end": 10.54,
+   "end": 10.43,
    "text": "Great. I can start with the beta, if that works for everyone."
   },
   {
    "speaker": "You",
    "side": "mic",
    "start": 10.94,
-   "end": 12.37,
+   "end": 12.12,
    "text": "Sure, go ahead."
   },
   {
@@ -34,14 +34,14 @@
    "speaker": "Ben",
    "side": "computer",
    "start": 19.9,
-   "end": 22.78,
+   "end": 22.56,
    "text": "Yeah."
   },
   {
    "speaker": "Anna",
    "side": "computer",
    "start": 23.08,
-   "end": 30.7,
+   "end": 30.6,
    "text": "The one thing still open is the preview on high resolution screens. The thumbnails look blurry at scale two."
   },
   {
@@ -55,35 +55,35 @@
    "speaker": "Carla",
    "side": "computer",
    "start": 36.31,
-   "end": 40.05,
+   "end": 39.95,
    "text": "Wait, is that the same bug we had with the wallpapers last month?"
   },
   {
    "speaker": "Ben",
    "side": "computer",
    "start": 40.35,
-   "end": 44.64,
+   "end": 44.4,
    "text": "Similar, but not the same code. The wallpaper one was the cache."
   },
   {
    "speaker": "You",
    "side": "mic",
    "start": 45.14,
-   "end": 47.57,
+   "end": 47.35,
    "text": "How long do you think the fix takes, Ben?"
   },
   {
    "speaker": "Ben",
    "side": "computer",
    "start": 47.97,
-   "end": 52.31,
+   "end": 52.15,
    "text": "Half a day, maybe less. Then Anna can test it tomorrow morning."
   },
   {
    "speaker": "Anna",
    "side": "computer",
    "start": 52.61,
-   "end": 54.61,
+   "end": 54.5,
    "text": "Tomorrow morning works for me."
   },
   {
@@ -97,7 +97,7 @@
    "speaker": "You",
    "side": "mic",
    "start": 60.39,
-   "end": 62.04,
+   "end": 61.77,
    "text": "Oh nice, tell us."
   },
   {
@@ -111,28 +111,28 @@
    "speaker": "Anna",
    "side": "computer",
    "start": 70.4,
-   "end": 71.86,
+   "end": 71.72,
    "text": "That is a big jump."
   },
   {
    "speaker": "Carla",
    "side": "computer",
    "start": 72.16,
-   "end": 76.26,
+   "end": 76.12,
    "text": "It is. I want to do the same for the keyboard layout question next week."
   },
   {
    "speaker": "You",
    "side": "mic",
    "start": 76.76,
-   "end": 80.6,
+   "end": 80.42,
    "text": "Let's do that. Ben, does that change anything on your side?"
   },
   {
    "speaker": "Ben",
    "side": "computer",
    "start": 81.0,
-   "end": 85.32,
+   "end": 85.2,
    "text": "No, it's only text and one picture, Carla can do that without me."
   },
   {
@@ -146,28 +146,28 @@
    "speaker": "You",
    "side": "mic",
    "start": 90.91,
-   "end": 94.13,
+   "end": 93.91,
    "text": "Four days is long. Did we hear anything back?"
   },
   {
    "speaker": "Ben",
    "side": "computer",
    "start": 94.43,
-   "end": 97.1,
+   "end": 96.92,
    "text": "Nothing yet. I'll ping them this afternoon."
   },
   {
    "speaker": "Anna",
    "side": "computer",
    "start": 97.6,
-   "end": 101.66,
+   "end": 101.55,
    "text": "If it's not merged by Thursday we should ship the theme picker without it."
   },
   {
    "speaker": "You",
    "side": "mic",
    "start": 102.06,
-   "end": 111.89,
+   "end": 111.69,
    "text": "Agreed. So to sum up: Ben fixes the blurry previews today, Anna tests them tomorrow, Carla starts on the keyboard question, and Ben chases the plugin review."
   },
   {
@@ -181,7 +181,7 @@
    "speaker": "Anna",
    "side": "computer",
    "start": 112.99,
-   "end": 115.11,
+   "end": 115.01,
    "text": "Perfect, thanks everyone."
   }
  ]
