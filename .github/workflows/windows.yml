@@ -405,7 +405,7 @@ jobs:
           retention-days: 14
           path: packaging/windows/*.msi
 
-  verify-gui:
+  verify-msi:
     needs: build
     runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     defaults:
@@ -428,14 +428,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           path: synthetic-audio-results/
-
-  verify-msi:
-    needs: build
-    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
-    defaults:
-      run:
-        shell: pwsh
-    steps:
       # Le diagnostic des DLL installées doit aussi disposer d'objdump après
       # déplacement sur la machine jetable, sans dépendre du PATH du PC.
       - name: Outil de vérification des imports MSI
