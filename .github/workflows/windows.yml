@@ -43,6 +43,14 @@ jobs:
       - name: Test des reprises de téléchargement MSYS2 (sans réseau)
         run: ./.github/scripts/test-msys2-download-retry.ps1
 
+      # PowerShell ignore la casse : $home est aussi la variable HOME en lecture seule.
+      - name: Test des variables PowerShell réservées du workflow
+        run: |
+          $reserved = '^\s*\$(?:HOME|PID|PSHOME)\s*='
+          if (Select-String -LiteralPath .github/workflows/windows.yml -Pattern $reserved -Quiet) {
+            throw 'Affectation à une variable PowerShell en lecture seule dans le workflow.'
+          }
+
       # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
       # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
       # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
@@ -53,9 +61,9 @@ jobs:
       - name: Vérifie Rust GNU préinstallé
         id: base-rust
         run: |
-          $home = 'C:\RhadaCI\tools\rust'
-          $cargoHome = Join-Path $home 'cargo'
-          $rustupHome = Join-Path $home 'rustup'
+          $rustRoot = 'C:\RhadaCI\tools\rust'
+          $cargoHome = Join-Path $rustRoot 'cargo'
+          $rustupHome = Join-Path $rustRoot 'rustup'
           $rustup = Join-Path $cargoHome 'bin\rustup.exe'
           $ready = Test-Path -LiteralPath $rustup -PathType Leaf
           if ($ready) {
