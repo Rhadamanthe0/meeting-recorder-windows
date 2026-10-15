@@ -43,6 +43,9 @@ jobs:
       - name: Test des reprises de téléchargement MSYS2 (sans réseau)
         run: ./.github/scripts/test-msys2-download-retry.ps1
 
+      - name: Test des reprises de téléchargement CI (sans réseau)
+        run: ./.github/scripts/test-ci-asset-download.ps1
+
       - name: Test du budget de démarrage synthétique (sans GUI)
         run: ./.github/scripts/test-synthetic-startup.ps1
 
@@ -163,7 +166,8 @@ jobs:
       - name: Install ffmpeg (pinné 9.0.2 vérifié)
         run: |
           $ffZip = Join-Path $env:RUNNER_TEMP "ffmpeg-9.0.2-essentials_build.zip"
-          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" -OutFile $ffZip
+          . ./.github/scripts/download-ci-asset.ps1
+          Invoke-CIAssetDownload -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" -OutFile $ffZip
           $expectedSize = 114768076
           $actualSize = (Get-Item -LiteralPath $ffZip).Length
           if ($actualSize -ne $expectedSize) { throw "Taille ZIP FFmpeg inattendue : $actualSize (attendu $expectedSize)" }
