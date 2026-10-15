@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   tag:
-    runs-on: [self-hosted, linux, x64, minipc, podman]
+    runs-on: [self-hosted, linux, x64, minipc, ephemeral, podman-jit-v2, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,4 +49,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          gh workflow run release.yml --ref master -f tag=v$VERSION
+          gh workflow run release.yml --ref master -f "tag=v$VERSION"
