@@ -107,9 +107,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Garder les compilations déjà réussies lorsqu'un test échoue ;
-          # les validations restent toutes réexécutées au run suivant.
-          cache-on-failure: true
+          # Publier les diagnostics d'échec sans attendre un export coûteux.
+          # Les compilations sont mises en cache après un job réussi.
+          cache-on-failure: false
           # Le cache précédent remplaçait les proxies rustup par des liens
           # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
           cache-bin: false
