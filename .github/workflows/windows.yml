@@ -43,6 +43,9 @@ jobs:
       - name: Test des reprises de téléchargement MSYS2 (sans réseau)
         run: ./.github/scripts/test-msys2-download-retry.ps1
 
+      - name: Test du budget de démarrage synthétique (sans GUI)
+        run: ./.github/scripts/test-synthetic-startup.ps1
+
       # PowerShell ignore la casse : $home est aussi la variable HOME en lecture seule.
       - name: Test des variables PowerShell réservées du workflow
         run: |
