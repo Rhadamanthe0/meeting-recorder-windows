@@ -26,6 +26,11 @@ jobs:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
       RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      # CI native du 16/10 : 20 min de compilation pour 20 s de tests audio.
+      # Garder les lignes des traces, sans les types/variables DWARF coûteux.
+      # Assertions, débordements et profil release conservent leurs valeurs.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
       # Le compte de service français « Système » a un nom non ASCII.
       # Les outils natifs MSYS2 doivent interpréter ses chemins en UTF-8.
       LANG: C.UTF-8
