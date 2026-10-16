@@ -1,8 +1,10 @@
 name: windows
 
 # Build Windows : toolchain GNU alignée sur les libs GTK MinGW (UCRT64).
+# Pour chaque PR, une seule CI. Tests des tags via release.yml.
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -41,12 +43,57 @@ jobs:
       - name: Test des reprises de téléchargement MSYS2 (sans réseau)
         run: ./.github/scripts/test-msys2-download-retry.ps1
 
+      - name: Test des reprises de téléchargement CI (sans réseau)
+        run: ./.github/scripts/test-ci-asset-download.ps1
+
+      - name: Test du budget de démarrage synthétique (sans GUI)
+        run: ./.github/scripts/test-synthetic-startup.ps1
+
+      - name: Test de l'ordre de préparation du cache Cargo (sans réseau)
+        run: ./.github/scripts/test-cache-order.ps1
+
+      # PowerShell ignore la casse : $home est aussi la variable HOME en lecture seule.
+      - name: Test des variables PowerShell réservées du workflow
+        run: |
+          $reserved = '^\s*\$(?:HOME|PID|PSHOME)\s*='
+          if (Select-String -LiteralPath .github/workflows/windows.yml -Pattern $reserved -Quiet) {
+            throw 'Affectation à une variable PowerShell en lecture seule dans le workflow.'
+          }
+
       # Stratégie GTK : hôte GNU x86_64-pc-windows-gnu, compatible avec les
       # libs GTK4/libadwaita MinGW (UCRT64) + gcc natif via pkg-config.
       # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
       # libadwaita MinGW depuis MSVC) :
       #   toolchain: stable / targets: x86_64-pc-windows-msvc
+      # Une référence immuable prééquipée (rhada-pc #37) fournit déjà Rust.
+      # Sans celle-ci, le même téléchargement dtolnay reste obligatoire.
+      - name: Vérifie Rust GNU préinstallé
+        id: base-rust
+        run: |
+          $rustRoot = 'C:\RhadaCI\tools\rust'
+          $cargoHome = Join-Path $rustRoot 'cargo'
+          $rustupHome = Join-Path $rustRoot 'rustup'
+          $rustup = Join-Path $cargoHome 'bin\rustup.exe'
+          $ready = Test-Path -LiteralPath $rustup -PathType Leaf
+          if ($ready) {
+            $env:CARGO_HOME = $cargoHome
+            $env:RUSTUP_HOME = $rustupHome
+            $rustInfo = & $rustup run $env:RUSTUP_TOOLCHAIN rustc -vV
+            if ($LASTEXITCODE -ne 0 -or -not ($rustInfo | Where-Object { $_ -eq 'host: x86_64-pc-windows-gnu' })) {
+              throw 'La toolchain GNU scellée est invalide.'
+            }
+            & $rustup run $env:RUSTUP_TOOLCHAIN cargo clippy --version
+            if ($LASTEXITCODE -ne 0) { throw 'Clippy scellé absent.' }
+            & $rustup run $env:RUSTUP_TOOLCHAIN rustfmt --version
+            if ($LASTEXITCODE -ne 0) { throw 'Rustfmt scellé absent.' }
+            "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "RUSTUP_HOME=$rustupHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            (Join-Path $cargoHome 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Install Rust stable GNU
+        if: steps.base-rust.outputs.ready != 'true'
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable-x86_64-pc-windows-gnu
@@ -58,29 +105,39 @@ jobs:
       - name: Affiche la toolchain (hôte GNU attendu)
         run: rustc -vV
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # Garder les compilations déjà réussies lorsqu'un test échoue ;
-          # les validations restent toutes réexécutées au run suivant.
-          cache-on-failure: true
-          # Le cache précédent remplaçait les proxies rustup par des liens
-          # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
-          cache-bin: false
-          prefix-key: v1-gnu-no-proxies
-
-      - name: Vérifie GNU après restauration du cache
+      # Renouveler la clé chaque semaine : un cache immuable de GitHub ne
+      # peut pas s'enrichir après les compilations d'un job déjà restauré.
+      - name: Période du cache Rust
         run: |
-          foreach ($tool in @("rustc", "cargo")) {
-            $version = & $tool -Vv
-            if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
-            $version | ForEach-Object { Write-Output $_ }
-            if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
-              throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
-            }
+          $today = [DateTime]::UtcNow.Date
+          $monday = $today.AddDays(-(([int]$today.DayOfWeek + 6) % 7))
+          "RUST_CACHE_WEEK=$($monday.ToString('yyyyMMdd'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Une référence qcow2 scellée peut déjà contenir GTK4 et libadwaita.
+      # Ancienne référence : installation temporaire inchangée, jamais de succès fictif.
+      - name: Vérifie la pile GTK préinstallée
+        id: base-gtk
+        run: |
+          $root = 'C:\msys64'
+          $bin = Join-Path $root 'ucrt64\bin'
+          $tools = @('pkgconf.exe', 'gcc.exe', 'clang.exe', 'cmake.exe')
+          $ready = Test-Path -LiteralPath (Join-Path $root 'usr\bin\bash.exe')
+          foreach ($tool in $tools) {
+            if (-not (Test-Path -LiteralPath (Join-Path $bin $tool))) { $ready = $false }
           }
+          if ($ready) {
+            $env:PKG_CONFIG_PATH = "$root\ucrt64\lib\pkgconfig;$root\ucrt64\share\pkgconfig"
+            $pkgconf = Join-Path $bin 'pkgconf.exe'
+            foreach ($package in @('gtk4', 'libadwaita-1')) {
+              & $pkgconf --modversion $package
+              if ($LASTEXITCODE -ne 0) { throw "Pile GTK préinstallée invalide : $package" }
+            }
+            "root=$root" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Install GTK4 (MSYS2 UCRT64)
+        if: steps.base-gtk.outputs.ready != 'true'
         id: msys2-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -93,8 +150,9 @@ jobs:
           cache: false
 
       - name: Met à jour MSYS2 et installe GTK sans arrêt global de processus
+        if: steps.base-gtk.outputs.ready != 'true'
         env:
-          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+          MSYS2_ROOT: ${{ steps.base-gtk.outputs.root || steps.msys2-tools.outputs.msys2-location }}
         run: ./.github/scripts/install-msys2-packages.ps1 -Root $env:MSYS2_ROOT
 
       # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
@@ -108,7 +166,8 @@ jobs:
       - name: Install ffmpeg (pinné 9.0.2 vérifié)
         run: |
           $ffZip = Join-Path $env:RUNNER_TEMP "ffmpeg-9.0.2-essentials_build.zip"
-          Invoke-WebRequest -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" -OutFile $ffZip
+          . ./.github/scripts/download-ci-asset.ps1
+          Invoke-CIAssetDownload -Uri "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip" -OutFile $ffZip
           $expectedSize = 114768076
           $actualSize = (Get-Item -LiteralPath $ffZip).Length
           if ($actualSize -ne $expectedSize) { throw "Taille ZIP FFmpeg inattendue : $actualSize (attendu $expectedSize)" }
@@ -127,7 +186,7 @@ jobs:
       # Expose pkg-config + gcc UCRT64 au build cargo (hôte GNU par défaut).
       - name: Expose GTK au build GNU
         env:
-          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
+          MSYS2_ROOT: ${{ steps.base-gtk.outputs.root || steps.msys2-tools.outputs.msys2-location }}
         run: |
           # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
           Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
@@ -158,6 +217,31 @@ jobs:
           "UCRT_BIN=$bindir" >> $env:GITHUB_ENV
           try { Copy-Item -LiteralPath $p -Destination (Join-Path $bindir "pkg-config.exe") } catch { Write-Warning "[ci] copie pkg-config.exe impossible, on continue : $($_.Exception.Message)" }
           Write-Output "[ci] pkgconf=$p"
+
+      # Restaurer apres MSYS2 : rust-cache inclut le compresseur disponible
+      # dans sa version, et le recalcule lors de l'export en fin de job.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Publier les diagnostics d'échec sans attendre un export coûteux.
+          # Les compilations sont mises en cache après un job réussi.
+          cache-on-failure: false
+          # Le cache précédent remplaçait les proxies rustup par des liens
+          # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
+          cache-bin: false
+          prefix-key: v1-gnu-no-proxies
+          key: windows-gnu-week-${{ env.RUST_CACHE_WEEK }}
+
+      - name: Vérifie GNU après restauration du cache
+        run: |
+          foreach ($tool in @("rustc", "cargo")) {
+            $version = & $tool -Vv
+            if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
+            $version | ForEach-Object { Write-Output $_ }
+            if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
+              throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
+            }
+          }
 
       # ORT dynamique : binaires Microsoft 1.28 pour ort-sys GNU (sans précompilés GNU).
       # Hash source : api.github.com repos/microsoft/onnxruntime releases/tags/v1.28.0,
@@ -403,7 +487,7 @@ jobs:
           retention-days: 14
           path: packaging/windows/*.msi
 
-  verify-gui:
+  verify-msi:
     needs: build
     runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     defaults:
@@ -426,17 +510,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           path: synthetic-audio-results/
-
-  verify-msi:
-    needs: build
-    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
-    defaults:
-      run:
-        shell: pwsh
-    steps:
       # Le diagnostic des DLL installées doit aussi disposer d'objdump après
       # déplacement sur la machine jetable, sans dépendre du PATH du PC.
       - name: Outil de vérification des imports MSI
+        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
+        if: ${{ !cancelled() }}
         id: msi-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -445,6 +523,9 @@ jobs:
           msystem: UCRT64
           install: mingw-w64-ucrt-x86_64-binutils
       - name: Download MSI construit
+        id: msi-download
+        # Indépendant du GUI, mais dépend bien de la préparation MSI.
+        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
@@ -454,6 +535,8 @@ jobs:
       # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
+        # Un échec GUI n'empêche pas MSI ; les prérequis MSI doivent avoir réussi.
+        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' && steps.msi-download.outcome == 'success' }}
         env:
           UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |

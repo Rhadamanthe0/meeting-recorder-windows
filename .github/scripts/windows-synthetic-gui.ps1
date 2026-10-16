@@ -6,20 +6,42 @@ $ErrorActionPreference = "Stop"
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 $Output = (Resolve-Path -LiteralPath $Output).Path
-# GUI-subsystem executables need an explicit wait and redirected output.
-$probe = Start-Process -FilePath $Exe -ArgumentList "--version" -PassThru -NoNewWindow `
-    -RedirectStandardOutput (Join-Path $Output "version.log") `
-    -RedirectStandardError (Join-Path $Output "version-stderr.log")
-try {
-    if (-not $probe.WaitForExit(10000)) {
-        Stop-Process -Id $probe.Id -Force
-        throw "Synthetic version check timed out; GUI launch refused"
+# Budget commun : les anciennes attentes successives etaient de 10 + 30 s.
+# Le premier chargement dans une VM neuve a depasse les 10 s sans lancer le GUI.
+function Get-SyntheticStartupRemaining($Clock) {
+    return [int][Math]::Max(0, 40000 - $Clock.ElapsedMilliseconds)
+}
+
+function Assert-SyntheticBinary($Exe, $Output, $Clock) {
+    if ((Get-SyntheticStartupRemaining $Clock) -le 0) {
+        throw "Synthetic startup budget exhausted; GUI launch refused"
     }
-    $version = Get-Content -LiteralPath (Join-Path $Output "version.log")
-    if ($probe.ExitCode -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
-        throw "GUI refused: ci-audio binary required; hardware capture is forbidden"
+    $probe = Start-Process -FilePath $Exe -ArgumentList "--version" -PassThru -NoNewWindow `
+        -RedirectStandardOutput (Join-Path $Output "version.log") `
+        -RedirectStandardError (Join-Path $Output "version-stderr.log")
+    $completed = $false
+    $exitCode = $null
+    try {
+        $remaining = Get-SyntheticStartupRemaining $Clock
+        if ($remaining -le 0 -or -not $probe.WaitForExit($remaining)) {
+            Stop-Process -Id $probe.Id -Force
+            throw "Synthetic version check exhausted the shared startup budget; GUI launch refused"
+        }
+        $completed = $true
+        $exitCode = $probe.ExitCode
+        $version = Get-Content -LiteralPath (Join-Path $Output "version.log")
+        if ($exitCode -ne 0 -or ($version -join " ") -notmatch 'CI synthetic audio; hardware audio disabled on Windows') {
+            throw "GUI refused: ci-audio binary required; hardware capture is forbidden (version exit $exitCode)"
+        }
+    } finally {
+        @{ elapsedMilliseconds = $Clock.ElapsedMilliseconds; startupBudgetMilliseconds = 40000;
+            completed = $completed; exitCode = $exitCode } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $Output "version-check.json") -Encoding utf8
+        $probe.Dispose()
     }
-} finally { $probe.Dispose() }
+}
+$startupClock = [Diagnostics.Stopwatch]::StartNew()
+Assert-SyntheticBinary $Exe $Output $startupClock
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
@@ -35,19 +57,20 @@ public static class SyntheticWindow {
 # the user's desktop. This script never sends keyboard/mouse events globally.
 $env:GDK_BACKEND = "win32"
 $env:GSK_RENDERER = "cairo"
+if ((Get-SyntheticStartupRemaining $startupClock) -le 0) { throw "Synthetic startup budget exhausted; GUI launch refused" }
 $process = Start-Process -FilePath $Exe -PassThru -NoNewWindow `
     -RedirectStandardOutput (Join-Path $Output "stdout.log") `
     -RedirectStandardError (Join-Path $Output "stderr.log")
 $pipe = $null
 $reader = $null
 try {
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
+        if ((Get-SyntheticStartupRemaining $startupClock) -le 0) { throw "Synthetic GUI startup budget exhausted" }
         $process.Refresh()
         if ($process.HasExited) { throw "Synthetic GUI exited with code $($process.ExitCode)" }
         if ($process.MainWindowHandle -ne [IntPtr]::Zero) { break }
         Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $deadline)
+    } while ((Get-SyntheticStartupRemaining $startupClock) -gt 0)
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "Synthetic GUI did not create a window" }
     # The CI binary has a separate application ID, settings, and pipe. Never
     # connect to the production recorder, even if it is already running.

@@ -93,12 +93,16 @@ silencieuse : voir [les contrôles CI sans périphériques réels](docs/ci-audio
 ## CI
 
 Tous les jobs ciblent MINIPC-CLEM, jamais PC-PRO-CLEM ni PC-FIXE-CLEM.
-Les tâches Linux utilisent `self-hosted,linux,x64,minipc,podman`.
+Les tâches Linux utilisent `self-hosted,linux,x64,minipc,ephemeral,podman-jit-v2`.
 Les compilations, tests et essais MSI Windows utilisent
 `self-hosted,windows,x64,minipc,ephemeral,meeting-recorder` : ces labels
 requièrent une VM Windows neuve par job, sans état réutilisé entre PR et release.
 Sans cet environnement, les jobs Windows restent en attente ; le runner
 Linux ne remplace pas les vérifications natives. Cette migration des workflows
 n'installe ni n'enregistre la VM ou les runners sur le serveur.
+Les deux OS exigent aussi `rhada-run-${{ github.run_id }}-${{ github.run_attempt }}`.
+Le contrôleur commun privilégie la PR la plus ancienne ayant des CI restantes,
+puis passe à la suivante dès leur fin sans attendre la fusion. Les anciens
+workflows de `master` restent dans la file héritée jusqu’à leur migration.
 
 D'après [omarchy-meeting-recorder](https://github.com/jankeesvw/omarchy-meeting-recorder). Licence MIT, voir `LICENSE`.

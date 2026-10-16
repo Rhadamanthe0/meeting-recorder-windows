@@ -308,7 +308,7 @@ jobs:
 
   release:
     needs: [build, verify-msi]
-    runs-on: [self-hosted, linux, x64, minipc, podman]
+    runs-on: [self-hosted, linux, x64, minipc, ephemeral, podman-jit-v2, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: write
     steps:
