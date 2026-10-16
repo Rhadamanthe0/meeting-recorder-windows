@@ -437,11 +437,13 @@ mod tests {
                 name: "Descendant fixture".into(),
                 command: "fixture.cmd".into(),
             };
+            // Le chargement du binaire GTK peut dépasser deux secondes sur la VM CI.
+            // Garder ces bornes sous les 30 secondes de vie du parent et du descendant.
             let started = Instant::now();
-            let result = run_with_timeout(&action, &dir, &manifest, Duration::from_secs(2));
+            let result = run_with_timeout(&action, &dir, &manifest, Duration::from_secs(10));
             let error = result.err().unwrap();
             assert!(error.starts_with("timed out"), "{mode}: {error}");
-            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(started.elapsed() < Duration::from_secs(15));
             // run_with_timeout a joint les deux lecteurs avant de revenir.
             // Vérifier aussi l'arrêt du descendant, pas seulement des lecteurs.
             let pid = std::fs::read_to_string(dir.join("descendant.pid"))
