@@ -46,6 +46,9 @@ jobs:
       - name: Test des reprises de téléchargement CI (sans réseau)
         run: ./.github/scripts/test-ci-asset-download.ps1
 
+      - name: Test de l'empreinte native du cache Cargo (sans réseau)
+        run: ./.github/scripts/test-rust-cache-native-tools.ps1
+
       - name: Test du budget de démarrage synthétique (sans GUI)
         run: ./.github/scripts/test-synthetic-startup.ps1
 
@@ -104,14 +107,6 @@ jobs:
 
       - name: Affiche la toolchain (hôte GNU attendu)
         run: rustc -vV
-
-      # Renouveler la clé chaque semaine : un cache immuable de GitHub ne
-      # peut pas s'enrichir après les compilations d'un job déjà restauré.
-      - name: Période du cache Rust
-        run: |
-          $today = [DateTime]::UtcNow.Date
-          $monday = $today.AddDays(-(([int]$today.DayOfWeek + 6) % 7))
-          "RUST_CACHE_WEEK=$($monday.ToString('yyyyMMdd'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # Une référence qcow2 scellée peut déjà contenir GTK4 et libadwaita.
       # Ancienne référence : installation temporaire inchangée, jamais de succès fictif.
@@ -218,6 +213,10 @@ jobs:
           try { Copy-Item -LiteralPath $p -Destination (Join-Path $bindir "pkg-config.exe") } catch { Write-Warning "[ci] copie pkg-config.exe impossible, on continue : $($_.Exception.Message)" }
           Write-Output "[ci] pkgconf=$p"
 
+      # Invalider sur les outils réellement utilisés, sans cache froid le lundi.
+      - name: Empreinte des outils natifs du cache Cargo
+        run: ./.github/scripts/set-rust-cache-native-tools.ps1
+
       # Restaurer apres MSYS2 : rust-cache inclut le compresseur disponible
       # dans sa version, et le recalcule lors de l'export en fin de job.
       - name: Cache cargo
@@ -229,8 +228,11 @@ jobs:
           # Le cache précédent remplaçait les proxies rustup par des liens
           # Cargo MSVC. Ne jamais restaurer les exécutables de la toolchain.
           cache-bin: false
-          prefix-key: v1-gnu-no-proxies
-          key: windows-gnu-week-${{ env.RUST_CACHE_WEEK }}
+          # Rust, options, outils natifs et dépendances restent dans la clé.
+          # Augmenter cette génération si les variantes de compilation ou les
+          # assets natifs épinglés (ORT) changent hors manifestes/environnement.
+          prefix-key: v2-gnu-no-proxies
+          key: windows-gnu
 
       - name: Vérifie GNU après restauration du cache
         run: |
@@ -337,7 +339,7 @@ jobs:
           Write-Output "[ci] cargo=$cargo bytes=$($item.Length)"
           Write-Output "[ci] cargo SHA256=$((Get-FileHash -LiteralPath $cargo -Algorithm SHA256).Hash)"
           try {
-            & $cargo check --locked
+            & $cargo check --locked --timings
             if ($LASTEXITCODE -ne 0) { throw "cargo check a échoué : $LASTEXITCODE" }
           } catch {
             $errorObject = $_.Exception
@@ -350,6 +352,16 @@ jobs:
             }
             throw
           }
+
+      # Mesurer les recompilations locales restantes sans modifier le cache.
+      - name: Upload durées de compilation Check
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cargo-check-timings
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Test
         run: cargo test --locked
@@ -512,9 +524,27 @@ jobs:
           path: synthetic-audio-results/
       # Le diagnostic des DLL installées doit aussi disposer d'objdump après
       # déplacement sur la machine jetable, sans dépendre du PATH du PC.
-      - name: Outil de vérification des imports MSI
-        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
+      - name: Vérifie objdump préinstallé pour les imports MSI
+        # Indépendant du résultat GUI ; une référence présente mais invalide échoue.
         if: ${{ !cancelled() }}
+        id: base-msi
+        run: |
+          $root = 'C:\msys64'
+          $objdump = Join-Path $root 'ucrt64\bin\objdump.exe'
+          $ready = Test-Path -LiteralPath $objdump -PathType Leaf
+          if ($ready) {
+            $version = & $objdump --version
+            if ($LASTEXITCODE -ne 0 -or -not ($version -match '^GNU objdump ')) { throw 'Objdump scellé invalide.' }
+            # Vérifier réellement la lecture PE avant de réutiliser cet outil.
+            $header = & $objdump -p (Join-Path $env:SystemRoot 'System32\kernel32.dll')
+            if ($LASTEXITCODE -ne 0 -or -not ($header -match 'file format pei-x86-64')) { throw 'Objdump scellé ne lit pas les PE x64.' }
+            $version | Select-Object -First 1
+            "root=$root" >> $env:GITHUB_OUTPUT
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - name: Outil de vérification des imports MSI
+        # Repli pour les références anciennes ; le contrôle des imports reste obligatoire.
+        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && steps.base-msi.outputs.ready != 'true' }}
         id: msi-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -525,7 +555,7 @@ jobs:
       - name: Download MSI construit
         id: msi-download
         # Indépendant du GUI, mais dépend bien de la préparation MSI.
-        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && (steps.base-msi.outputs.ready == 'true' || steps.msi-tools.outcome == 'success') }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
@@ -536,9 +566,9 @@ jobs:
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
         # Un échec GUI n'empêche pas MSI ; les prérequis MSI doivent avoir réussi.
-        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' && steps.msi-download.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && (steps.base-msi.outputs.ready == 'true' || steps.msi-tools.outcome == 'success') && steps.msi-download.outcome == 'success' }}
         env:
-          UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
+          UCRT_BIN: ${{ steps.base-msi.outputs.root || steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
           $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
           if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
