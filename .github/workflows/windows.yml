@@ -337,7 +337,7 @@ jobs:
           Write-Output "[ci] cargo=$cargo bytes=$($item.Length)"
           Write-Output "[ci] cargo SHA256=$((Get-FileHash -LiteralPath $cargo -Algorithm SHA256).Hash)"
           try {
-            & $cargo check --locked
+            & $cargo check --locked --timings
             if ($LASTEXITCODE -ne 0) { throw "cargo check a échoué : $LASTEXITCODE" }
           } catch {
             $errorObject = $_.Exception
@@ -350,6 +350,16 @@ jobs:
             }
             throw
           }
+
+      # Mesurer les recompilations locales restantes sans modifier le cache.
+      - name: Upload durées de compilation Check
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cargo-check-timings
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Test
         run: cargo test --locked
