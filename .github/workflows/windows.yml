@@ -512,9 +512,27 @@ jobs:
           path: synthetic-audio-results/
       # Le diagnostic des DLL installées doit aussi disposer d'objdump après
       # déplacement sur la machine jetable, sans dépendre du PATH du PC.
-      - name: Outil de vérification des imports MSI
-        # Exécuter le contrôle MSI même si le smoke GUI échoue ; l'échec GUI reste bloquant.
+      - name: Vérifie objdump préinstallé pour les imports MSI
+        # Indépendant du résultat GUI ; une référence présente mais invalide échoue.
         if: ${{ !cancelled() }}
+        id: base-msi
+        run: |
+          $root = 'C:\msys64'
+          $objdump = Join-Path $root 'ucrt64\bin\objdump.exe'
+          $ready = Test-Path -LiteralPath $objdump -PathType Leaf
+          if ($ready) {
+            $version = & $objdump --version
+            if ($LASTEXITCODE -ne 0 -or -not ($version -match '^GNU objdump ')) { throw 'Objdump scellé invalide.' }
+            # Vérifier réellement la lecture PE avant de réutiliser cet outil.
+            $header = & $objdump -p (Join-Path $env:SystemRoot 'System32\kernel32.dll')
+            if ($LASTEXITCODE -ne 0 -or -not ($header -match 'file format pei-x86-64')) { throw 'Objdump scellé ne lit pas les PE x64.' }
+            $version | Select-Object -First 1
+            "root=$root" >> $env:GITHUB_OUTPUT
+          }
+          "ready=$($ready.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - name: Outil de vérification des imports MSI
+        # Repli pour les références anciennes ; le contrôle des imports reste obligatoire.
+        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && steps.base-msi.outputs.ready != 'true' }}
         id: msi-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -525,7 +543,7 @@ jobs:
       - name: Download MSI construit
         id: msi-download
         # Indépendant du GUI, mais dépend bien de la préparation MSI.
-        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && (steps.base-msi.outputs.ready == 'true' || steps.msi-tools.outcome == 'success') }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
@@ -536,9 +554,9 @@ jobs:
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
         # Un échec GUI n'empêche pas MSI ; les prérequis MSI doivent avoir réussi.
-        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' && steps.msi-download.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && (steps.base-msi.outputs.ready == 'true' || steps.msi-tools.outcome == 'success') && steps.msi-download.outcome == 'success' }}
         env:
-          UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
+          UCRT_BIN: ${{ steps.base-msi.outputs.root || steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
           $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
           if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
