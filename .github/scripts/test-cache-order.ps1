@@ -14,6 +14,10 @@ $cache = Get-StepPosition 'Cache cargo'
 foreach ($name in @('Install GTK4 (MSYS2 UCRT64)', 'Met à jour MSYS2 et installe GTK sans arrêt global de processus', 'Expose GTK au build GNU')) {
     if ((Get-StepPosition $name) -gt $cache) { throw 'Prepare MSYS2 and its compressor before restoring Cargo cache.' }
 }
+$native = Get-StepPosition 'Empreinte des outils natifs du cache Cargo'
+if ($native -lt (Get-StepPosition 'Expose GTK au build GNU') -or $native -gt $cache) {
+    throw 'Fingerprint the prepared native tools before restoring Cargo cache.'
+}
 if ((Get-StepPosition 'Vérifie GNU après restauration du cache') -lt $cache) { throw 'The GNU check must follow cache restoration.' }
 if ((Get-StepPosition 'Check') -lt $cache) { throw 'Cargo compilation must follow cache restoration.' }
 Write-Output 'OK: cache restore and export share the prepared tool environment'
