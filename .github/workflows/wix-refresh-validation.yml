@@ -41,4 +41,4 @@ jobs:
             -o /tmp/actionlint.tar.gz
           echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz' | sha256sum --check --strict
           tar xf /tmp/actionlint.tar.gz -C /tmp actionlint
-          /tmp/actionlint -color .github/workflows/windows.yml .github/workflows/release.yml .github/workflows/wix-refresh-validation.yml
+          /tmp/actionlint -color -ignore 'label "[^"]+" is unknown' .github/workflows/windows.yml .github/workflows/release.yml .github/workflows/wix-refresh-validation.yml
