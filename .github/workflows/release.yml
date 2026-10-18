@@ -28,7 +28,7 @@ concurrency:
 jobs:
   build:
     # Tags et dispatch manuel : VM MINIPC neuve pour le build natif.
-    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    runs-on: [self-hosted, Windows, X64, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     permissions:
       contents: read
     env:
@@ -337,7 +337,7 @@ jobs:
 
   verify-msi:
     needs: build
-    runs-on: [self-hosted, Windows, X64, minipc, ephemeral, meeting-recorder, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    runs-on: [self-hosted, Windows, X64, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
     defaults:
       run:
         shell: pwsh
