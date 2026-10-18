@@ -258,8 +258,38 @@ jobs:
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
       # WiX v3 portable, pinné et vérifié, sans installation globale sur le PC.
+      # WiX vérifié dans l'image => aucun téléchargement de cache.
+      # Le ZIP validé seul peut persister entre les VM éphémères.
+      - name: Vérifie WiX préinstallé avant restauration du cache
+        id: wix-base
+        run: |
+          . ./.github/scripts/verify-wix-preinstalled.ps1
+          $ready = Test-CIWiXPreinstalled -Directory 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
+          "ready=$($ready.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Restaure archive WiX précédemment vérifiée
+        id: wix-cache-restore
+        if: steps.wix-base.outputs.ready != 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}\meeting-recorder-wix-cache\wix314-binaries.zip
+          # Clé unique pour pouvoir remplacer un cache corrompu sans écrasement.
+          key: wix314-archive-sha256-6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            wix314-archive-sha256-6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31-
+
       - name: Prépare WiX v3 portable (MSI)
+        id: wix-setup
         run: ./.github/scripts/setup-wix.ps1
+
+      - name: Reconstitue le cache GitHub si WiX a dû être téléchargé
+        if: ${{ success() && steps.wix-setup.outputs.cache_refreshed == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}\meeting-recorder-wix-cache\wix314-binaries.zip
+          key: ${{ steps.wix-cache-restore.outputs.cache-primary-key }}
 
       # MSI per-user : stage runtime (collect-runtime.ps1, qui couvre aussi les
       # DLLs MinGW via target/release puis UCRT_BIN) puis heat/candle/light.

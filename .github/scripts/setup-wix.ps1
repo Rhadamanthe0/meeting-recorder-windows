@@ -1,15 +1,14 @@
-# WiX 3.14.1 portable : aucun Chocolatey, installateur global ou privilège admin.
-$ErrorActionPreference = "Stop"
-# La référence scellée contient la même archive officielle, vérifiée lors de
-# son provisionnement. Contrôler les binaires avant toute exécution : la
-# version affichée par un binaire non fiable ne prouve pas son authenticité.
-# WiX provient d'une archive officielle vérifiée (SHA-256 6ac824...).
-# Un binaire préinstallé ne doit jamais être exécuté sans validation
-# indépendante de ses octets, même si sa version auto-déclarée est correcte.
+# WiX 3.14.1 portable : aucune installation globale, ni privilège admin.
+$ErrorActionPreference = 'Stop'
+# Vérifier le hash en ligne quand GitHub le publie ; à défaut, utiliser
+# exclusivement le hash du ZIP officiel épinglé par le dépôt.
 . (Join-Path $PSScriptRoot 'verify-wix-preinstalled.ps1')
+. (Join-Path $PSScriptRoot 'download-ci-asset.ps1')
+$expectedArchiveSha256 = Get-CIWiXTrustedArchiveSha256
+
 $baseWix = 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
 if (Test-CIWiXPreinstalled -Directory $baseWix) {
-    foreach ($name in @("candle.exe", "light.exe", "heat.exe")) {
+    foreach ($name in @('candle.exe', 'light.exe', 'heat.exe')) {
         $help = & (Join-Path $baseWix $name) -?
         if ($LASTEXITCODE -ne 0 -or -not ($help -match '\b3\.14\.1\.8722\b')) {
             throw "WiX scellé invalide : $name (3.14.1.8722 attendu)"
@@ -17,30 +16,31 @@ if (Test-CIWiXPreinstalled -Directory $baseWix) {
         $help | Select-Object -First 2
     }
     $baseWix >> $env:GITHUB_PATH
-    Write-Output "[ci] WiX 3.14.1 scellé vérifié (SHA-256) : $baseWix"
+    Write-Output "[ci] WiX 3.14.1 préinstallé vérifié (SHA-256) : $baseWix"
     return
 }
-if (Test-Path -LiteralPath $baseWix) {
-    Write-Warning "WiX préinstallé absent/incomplet ou SHA-256 invalide : utilisation de l'archive officielle vérifiée."
+
+# VM éphémère : RUNNER_TEMP n'est pas persistant. La CI peut restaurer et
+# sauvegarder le ZIP vérifié via GitHub Actions entre deux VM.
+$cacheDirectory = Join-Path $env:RUNNER_TEMP 'meeting-recorder-wix-cache'
+$archive = Restore-CIWiXVerifiedArchive -CacheDirectory $cacheDirectory -ExpectedSha256 $expectedArchiveSha256 -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip'
+if ($archive.Refreshed -and $env:GITHUB_OUTPUT) {
+    "cache_refreshed=true" >> $env:GITHUB_OUTPUT
 }
-# Sans référence équipée, conserver le téléchargement pinné et ses contrôles.
-$wixDir = Join-Path $env:RUNNER_TEMP ("meeting-recorder-wix-" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $wixDir | Out-Null
-$zip = Join-Path $wixDir "wix314-binaries.zip"
-Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile $zip
-# Archive officielle wix3141rtm téléchargée et vérifiée le 8 octobre 2026.
-if ((Get-Item -LiteralPath $zip).Length -ne 41297555) { throw "Taille WiX inattendue" }
-$expected = "6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31"
-if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
-    throw "SHA-256 WiX inattendu : archive refusée"
+$wixDir = Join-Path $env:RUNNER_TEMP ('meeting-recorder-wix-verified-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $wixDir
+Expand-Archive -LiteralPath $archive.Path -DestinationPath $wixDir
+# Contrôle les exécutables extraits avant le premier lancement.
+if (-not (Test-CIWiXPreinstalled -Directory $wixDir)) {
+    throw 'Outils WiX extraits non conformes : aucun exécutable lancé.'
 }
-Expand-Archive -LiteralPath $zip -DestinationPath $wixDir
-foreach ($name in @("candle.exe", "light.exe", "heat.exe")) {
+foreach ($name in @('candle.exe', 'light.exe', 'heat.exe')) {
     $tool = Join-Path $wixDir $name
-    if (-not (Test-Path -LiteralPath $tool)) { throw "WiX incomplet : $name absent" }
     $help = & $tool -?
-    if ($LASTEXITCODE -ne 0) { throw "$name ne démarre pas (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0 -or -not ($help -match '\b3\.14\.1\.8722\b')) {
+        throw "WiX extrait invalide : $name (3.14.1.8722 attendu)"
+    }
     $help | Select-Object -First 2
 }
 $wixDir >> $env:GITHUB_PATH
-Write-Output "[ci] WiX 3.14.1 vérifié : $wixDir"
+Write-Output "[ci] WiX 3.14.1 vérifié depuis archive mise en cache : $wixDir"
