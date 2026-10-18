@@ -1,13 +1,14 @@
 # WiX 3.14.1 portable : aucun Chocolatey, installateur global ou privilège admin.
 $ErrorActionPreference = "Stop"
 # La référence scellée contient la même archive officielle, vérifiée lors de
-# son provisionnement. Ne pas la télécharger/extraire à nouveau dans chaque VM.
+# son provisionnement. Contrôler les binaires avant toute exécution : la
+# version affichée par un binaire non fiable ne prouve pas son authenticité.
+# WiX provient d'une archive officielle vérifiée (SHA-256 6ac824...).
+# Un binaire préinstallé ne doit jamais être exécuté sans validation
+# indépendante de ses octets, même si sa version auto-déclarée est correcte.
+. (Join-Path $PSScriptRoot 'verify-wix-preinstalled.ps1')
 $baseWix = 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
-if (Test-Path -LiteralPath $baseWix) {
-    foreach ($name in @("candle.exe", "light.exe", "heat.exe")) {
-        $tool = Join-Path $baseWix $name
-        if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "WiX scellé incomplet : $name absent" }
-    }
+if (Test-CIWiXPreinstalled -Directory $baseWix) {
     foreach ($name in @("candle.exe", "light.exe", "heat.exe")) {
         $help = & (Join-Path $baseWix $name) -?
         if ($LASTEXITCODE -ne 0 -or -not ($help -match '\b3\.14\.1\.8722\b')) {
@@ -16,8 +17,11 @@ if (Test-Path -LiteralPath $baseWix) {
         $help | Select-Object -First 2
     }
     $baseWix >> $env:GITHUB_PATH
-    Write-Output "[ci] WiX 3.14.1 scellé vérifié : $baseWix"
+    Write-Output "[ci] WiX 3.14.1 scellé vérifié (SHA-256) : $baseWix"
     return
+}
+if (Test-Path -LiteralPath $baseWix) {
+    Write-Warning "WiX préinstallé absent/incomplet ou SHA-256 invalide : utilisation de l'archive officielle vérifiée."
 }
 # Sans référence équipée, conserver le téléchargement pinné et ses contrôles.
 $wixDir = Join-Path $env:RUNNER_TEMP ("meeting-recorder-wix-" + [Guid]::NewGuid().ToString("N"))

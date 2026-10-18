@@ -40,6 +40,9 @@ jobs:
         shell: powershell
         run: ./.github/scripts/setup-powershell.ps1
 
+      - name: Test des empreintes WiX préinstallé (sans réseau)
+        run: ./.github/scripts/test-wix-preinstalled.ps1
+
       - name: Test des reprises de téléchargement MSYS2 (sans réseau)
         run: ./.github/scripts/test-msys2-download-retry.ps1
 
