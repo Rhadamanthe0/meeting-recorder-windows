@@ -49,6 +49,9 @@ jobs:
       - name: Test de l'empreinte native du cache Cargo (sans réseau)
         run: ./.github/scripts/test-rust-cache-native-tools.ps1
 
+      - name: Test de la clé du cache natif Whisper (sans réseau)
+        run: ./.github/scripts/test-whisper-native-cache-key.ps1
+
       - name: Test du budget de démarrage synthétique (sans GUI)
         run: ./.github/scripts/test-synthetic-startup.ps1
 
@@ -235,7 +238,9 @@ jobs:
           key: windows-gnu
 
       - name: Vérifie GNU après restauration du cache
+        id: gnu-tools
         run: |
+          $toolVersions = [System.Collections.Generic.List[string]]::new()
           foreach ($tool in @("rustc", "cargo")) {
             $version = & $tool -Vv
             if ($LASTEXITCODE -ne 0) { throw "$tool ne démarre pas" }
@@ -243,7 +248,30 @@ jobs:
             if (-not ($version | Where-Object { $_ -match '^host: x86_64-pc-windows-gnu$' })) {
               throw "$tool n'utilise pas la toolchain GNU : compilation refusée"
             }
+            $toolVersions.Add($tool)
+            $version | ForEach-Object { $toolVersions.Add([string]$_) }
           }
+          # Réutiliser ces versions vérifiées : aucune nouvelle invocation des outils.
+          $bytes = [Text.Encoding]::UTF8.GetBytes(($toolVersions -join "`n"))
+          $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+          "fingerprint=$digest" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Empreinte des résultats natifs Whisper
+        id: whisper-native-key
+        run: ./.github/scripts/set-whisper-native-cache-key.ps1 -RustToolsSha256 '${{ steps.gnu-tools.outputs.fingerprint }}'
+
+      # rust-cache retire les crates locales, donc aussi leurs résultats CMake.
+      # Restaurer ensuite leurs seuls OUT_DIR, avec une clé exacte sans repli.
+      # Ces dossiers incluent les sondes CMake ; aucun proxy ou outil installé.
+      - name: Restaure les résultats natifs Whisper
+        id: whisper-native-cache
+        if: steps.whisper-native-key.outputs.cacheable == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          key: ${{ steps.whisper-native-key.outputs.key }}
+          path: |
+            target/debug/build/whisper-rs-sys-*/out
+            target/release/build/whisper-rs-sys-*/out
 
       # ORT dynamique : binaires Microsoft 1.28 pour ort-sys GNU (sans précompilés GNU).
       # Hash source : api.github.com repos/microsoft/onnxruntime releases/tags/v1.28.0,
@@ -364,7 +392,16 @@ jobs:
           retention-days: 7
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --timings
+
+      - name: Upload durées de compilation Test
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cargo-test-timings
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
 
       # Les diagnostics Windows sont corrigés : un échec doit bloquer la CI.
       - name: Clippy (bloquant)
@@ -498,6 +535,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: packaging/windows/*.msi
+
+      # Sauvegarder après réussite complète, avant le nettoyage post de rust-cache.
+      - name: Sauvegarde les résultats natifs Whisper
+        if: ${{ success() && steps.whisper-native-key.outputs.cacheable == 'true' && steps.whisper-native-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          key: ${{ steps.whisper-native-key.outputs.key }}
+          path: |
+            target/debug/build/whisper-rs-sys-*/out
+            target/release/build/whisper-rs-sys-*/out
 
   verify-msi:
     needs: build
