@@ -180,7 +180,7 @@ pub fn export_audio(mic_raw: &Path, system_raw: &Path, out: &Path, format: Forma
         return false;
     }
     if std::fs::metadata(mic_raw).map(|m| m.len()).unwrap_or(0) == 0 {
-        return true; // nothing was recorded
+        return false; // no audio output was written
     }
 
     let rate = RATE.to_string();
@@ -341,6 +341,31 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn empty_capture_never_reports_audio_saved() {
+        for format in Format::ALL {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "omr-empty-audio-{}-{unique}-{format:?}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mic = dir.join("mic.raw");
+            let system = dir.join("system.raw");
+            std::fs::write(&mic, []).unwrap();
+            std::fs::write(&system, []).unwrap();
+
+            assert!(!export_audio(&mic, &system, &dir, format));
+            assert!(!dir.join("audio.ogg").exists());
+            assert!(!dir.join("mic.ogg").exists());
+            assert!(!dir.join("computer.ogg").exists());
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
