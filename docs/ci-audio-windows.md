@@ -1,8 +1,9 @@
 # Tests Windows sans accès aux périphériques audio
 
 Tous les jobs Windows de `windows` et `release` utilisent une VM KVM neuve
-sur MINIPC-CLEM, avec les labels `self-hosted,windows,x64,minipc,ephemeral,
-meeting-recorder` et un label propre au run et à sa tentative. Les PR de forks
+sur MINIPC-CLEM, avec les quatre labels `self-hosted`, `Windows`, `X64` et
+`rhada-run-${{ github.run_id }}-${{ github.run_attempt }}`. Le contrôleur vérifie
+l'affinité au dépôt, au run et à sa tentative. Les PR de forks
 utilisent le profil de test isolé. Le lancement manuel utilise également
 MINIPC-CLEM.
 
