@@ -365,58 +365,65 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn descendant_fixture() {
-        let Ok(mode) = std::env::var("OMR_ACTION_FIXTURE") else {
-            return;
-        };
-        if mode == "leaf" {
-            for _ in 0..3000 {
-                println!("descendant stdout");
-                eprintln!("descendant stderr");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            return;
-        }
-        let mut child = silent_command(std::env::current_exe().unwrap())
-            .args([
-                "actions::tests::descendant_fixture",
-                "--exact",
-                "--nocapture",
-            ])
-            .env("OMR_ACTION_FIXTURE", "leaf")
-            .spawn()
-            .unwrap();
-        std::fs::write("descendant.pid", child.id().to_string()).unwrap();
-        // Reap a child that finishes early. In the "exited" fixture the
-        // parent can still exit immediately, leaving its child alive:
-        // the action's Job Object must clean it up.
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        if mode == "running" {
-            std::thread::sleep(Duration::from_secs(30));
-        }
-    }
-
-    #[test]
-    #[cfg(windows)]
     fn timeout_reaps_descendants_and_pipe_readers_even_after_shell_exit() {
         use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
+        // A fresh root excludes stale PID/phase files if a previous test crashed.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let fixture_dir =
+            std::env::temp_dir().join(format!("mr-action-helper-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&fixture_dir).unwrap();
+        // Compile and probe once, outside both timed cleanup checks.
+        let source = fixture_dir.join("action_descendant.rs");
+        let helper = fixture_dir.join("action_descendant.exe");
+        std::fs::write(
+            &source,
+            include_str!("../tests/fixtures/action-descendant.rs"),
+        )
+        .unwrap();
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let mut compiler = silent_command(rustc);
+        compiler
+            .args([
+                "--edition=2024",
+                "--crate-name",
+                "action_descendant_fixture",
+                "-Dwarnings",
+            ])
+            .arg(&source)
+            .arg("-o")
+            .arg(&helper);
+        let output = process::output(&mut compiler).expect("compile descendant fixture");
+        assert!(
+            output.status.success(),
+            "fixture compiler failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut probe = silent_command(&helper);
+        probe.arg("--probe");
+        let output = process::output(&mut probe).expect("probe descendant fixture");
+        assert!(
+            output.status.success(),
+            "fixture probe failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "action descendant fixture ready"
+        );
         for mode in ["running", "exited"] {
-            let dir = std::env::temp_dir().join(format!(
-                "mr-action-descendants-{}-{mode}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir = fixture_dir.join(mode);
+            std::fs::create_dir(&dir).unwrap();
             std::fs::write(
                 dir.join("fixture.cmd"),
-                format!(
-                    "@echo off\r\nset OMR_ACTION_FIXTURE={mode}\r\n\"{}\" actions::tests::descendant_fixture --exact --nocapture\r\n",
-                    std::env::current_exe().unwrap().display()
-                ),
+                format!("@echo off\r\n\"{}\" {mode}\r\n", helper.display()),
             )
             .unwrap();
             let manifest = Manifest {
@@ -437,17 +444,32 @@ mod tests {
                 name: "Descendant fixture".into(),
                 command: "fixture.cmd".into(),
             };
-            // Le chargement du binaire GTK peut dépasser deux secondes sur la VM CI.
-            // Garder ces bornes sous les 30 secondes de vie du parent et du descendant.
+            // The helper loads std only. Keep the same strict cleanup bounds,
+            // below the thirty-second lifetime of the parent and descendant.
             let started = Instant::now();
             let result = run_with_timeout(&action, &dir, &manifest, Duration::from_secs(10));
             let error = result.err().unwrap();
-            assert!(error.starts_with("timed out"), "{mode}: {error}");
-            assert!(started.elapsed() < Duration::from_secs(15));
+            let elapsed = started.elapsed();
+            let phase = std::fs::read_to_string(dir.join("fixture.phase"))
+                .unwrap_or_else(|error| format!("phase unavailable: {error}"));
+            assert!(error.starts_with("timed out"), "{mode}: {error}; {phase}");
+            assert!(elapsed < Duration::from_secs(15), "{mode}: {phase}");
+            let expected_phase = if mode == "running" {
+                "parent waiting"
+            } else {
+                "parent exiting"
+            };
+            assert_eq!(
+                phase,
+                format!("{mode}: {expected_phase}"),
+                "{mode}: incomplete fixture"
+            );
             // run_with_timeout a joint les deux lecteurs avant de revenir.
             // Vérifier aussi l'arrêt du descendant, pas seulement des lecteurs.
             let pid = std::fs::read_to_string(dir.join("descendant.pid"))
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    panic!("{mode}: descendant PID unavailable: {error}; {phase}")
+                })
                 .parse()
                 .unwrap();
             unsafe {
@@ -462,6 +484,7 @@ mod tests {
             }
             std::fs::remove_dir_all(&dir).unwrap();
         }
+        std::fs::remove_dir_all(&fixture_dir).unwrap();
     }
 
     #[test]
