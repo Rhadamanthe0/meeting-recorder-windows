@@ -1034,17 +1034,23 @@ fn peaks(path: &Path) -> Option<Vec<f32>> {
         .iter()
         .map(|b| f32::from(i16::from_le_bytes(*b)).abs() / 32768.0)
         .collect();
-    if samples.is_empty() {
-        return Some(vec![0.0; BINS]);
-    }
-    let per_bin = samples.len().div_ceil(BINS);
-    let mut bins: Vec<f32> = samples
-        .chunks(per_bin)
-        .map(|chunk| chunk.iter().copied().fold(0.0, f32::max))
+    Some(waveform_bins(&samples))
+}
+
+/// Every bin spans its proportional time interval; rounding chunk size up
+/// would leave a blank tail for durations not divisible by BINS.
+fn waveform_bins(samples: &[f32]) -> Vec<f32> {
+    let len = samples.len();
+    let bins: Vec<f32> = (0..BINS)
+        .map(|bin| {
+            samples[len * bin / BINS..len * (bin + 1) / BINS]
+                .iter()
+                .copied()
+                .fold(0.0, f32::max)
+        })
         .collect();
-    bins.resize(BINS, 0.0);
     let loudest = bins.iter().copied().fold(0.0, f32::max).max(1e-4);
-    Some(bins.into_iter().map(|v| (v / loudest).sqrt()).collect())
+    bins.into_iter().map(|v| (v / loudest).sqrt()).collect()
 }
 
 fn clock(secs: i64) -> String {
@@ -1053,6 +1059,29 @@ fn clock(secs: i64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod waveform_tests {
+    use super::*;
+
+    #[test]
+    fn non_divisible_audio_uses_the_entire_waveform_width() {
+        for count in [BINS + 1, BINS * 8 + 1] {
+            let bins = waveform_bins(&vec![1.0; count]);
+            assert_eq!(bins.len(), BINS);
+            assert!(bins.iter().all(|&v| v == 1.0), "samples: {count}");
+        }
+    }
+
+    #[test]
+    fn last_audio_sample_stays_at_the_right_edge() {
+        let mut samples = vec![0.0; BINS + 1];
+        *samples.last_mut().unwrap() = 1.0;
+        let bins = waveform_bins(&samples);
+        assert_eq!(bins[BINS - 1], 1.0);
+        assert!(bins[..BINS - 1].iter().all(|&v| v == 0.0));
     }
 }
 
