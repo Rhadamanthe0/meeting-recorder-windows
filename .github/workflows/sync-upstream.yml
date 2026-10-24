@@ -18,7 +18,8 @@ permissions:
 
 jobs:
   watch:
-    runs-on: [self-hosted, linux, x64, minipc, ephemeral, podman-jit-v2, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    # Dépôt public : runner Linux hébergé par GitHub (gh CLI préinstallé).
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

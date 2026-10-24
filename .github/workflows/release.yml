@@ -27,15 +27,16 @@ concurrency:
 
 jobs:
   build:
-    # Tags et dispatch manuel : VM MINIPC neuve pour le build natif.
-    runs-on: [self-hosted, Windows, X64, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    # Tag et dispatch manuel : runner Windows hébergé par GitHub (dépôt public),
+    # neuf pour chaque build.
+    runs-on: windows-latest
     permissions:
       contents: read
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
       RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
-      # Même locale UTF-8 que le build Windows exécuté en service.
+      # Même locale UTF-8 que le workflow `windows`.
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
     defaults:
@@ -43,10 +44,6 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Prépare PowerShell pour le service Windows
-        shell: powershell
-        run: ./.github/scripts/setup-powershell.ps1
 
       # Dispatch manuel : le tag doit exister sur origin, sinon échec.
       # Publier un MSI `X.Y.Z` depuis master quand `vX.Y.Z` n'existe pas est
@@ -125,7 +122,7 @@ jobs:
           __SETUP_MSYS2_USE_MAIN_MIRROR_ONLY: "true"
         with:
           msystem: UCRT64
-          # Même mise à jour complète, sans taskkill global sur le PC.
+          # Même mise à jour complète, sans arrêt global de processus.
           update: false
           cache: false
 
@@ -144,26 +141,9 @@ jobs:
         env:
           MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
         run: |
-          # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
-          Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
-          Get-ChildItem $env:RUNNER_TEMP -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[ci] tempdir: $($_.FullName)" }
-          $roots = @($env:MSYS2_ROOT, (Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
-          $p = $null
-          try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
-          foreach ($r in $roots) {
-            Write-Output "[ci] test racine : $r -> $(Test-Path $r)"
-            foreach ($sub in @("ucrt64\bin\pkgconf.exe", "msys64\ucrt64\bin\pkgconf.exe", "usr\bin\pkgconf.exe")) {
-              $cand = $null; try { if ($r) { $cand = Join-Path $r $sub } } catch { $cand = $null }
-              if (-not $p -and $cand -and (Test-Path $cand)) { $p = $cand }
-            }
-            if (Test-Path $r) { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { Write-Output "[ci] subdir de $r : $($_.Name)" } }
-          }
-          if (-not $p) {
-            Write-Output "[ci] recherche pkgconf.exe sous RUNNER_TEMP (peut prendre 1-2 min)"
-            Get-ChildItem -Path $env:RUNNER_TEMP -Filter "pkgconf.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Write-Output "[ci] trouve : $($_.FullName)"; if (-not $p) { $p = $_.FullName } }
-          }
-          if (-not $p) { throw "pkgconf.exe introuvable meme apres diagnostic (voir [ci] ci-dessus)" }
-          $bindir = Split-Path $p -Parent
+          $bindir = Join-Path $env:MSYS2_ROOT "ucrt64\bin"
+          $p = Join-Path $bindir "pkgconf.exe"
+          if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "pkgconf.exe introuvable : $p (MSYS2_ROOT=$env:MSYS2_ROOT)" }
           $ucrt = Split-Path $bindir -Parent
           $bindir >> $env:GITHUB_PATH
           "PKG_CONFIG=$p" >> $env:GITHUB_ENV
@@ -257,7 +237,8 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # WiX v3 portable, pinné et vérifié, sans installation globale sur le PC.
+      # WiX v3 portable, pinné et vérifié : version fixée par le dépôt (le
+      # WiX global de l'image hébergée peut changer sans PR).
       - name: Prépare WiX v3 portable (MSI)
         run: ./.github/scripts/setup-wix.ps1
 
@@ -308,7 +289,8 @@ jobs:
 
   release:
     needs: [build, verify-msi]
-    runs-on: [self-hosted, linux, x64, minipc, ephemeral, podman-jit-v2, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    # Publication seule (téléchargement d'artefact + release GitHub) : Linux hébergé.
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -337,7 +319,7 @@ jobs:
 
   verify-msi:
     needs: build
-    runs-on: [self-hosted, Windows, X64, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    runs-on: windows-latest
     defaults:
       run:
         shell: pwsh
@@ -357,11 +339,11 @@ jobs:
             Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
             throw "msiexec /i exit $($install.ExitCode)"
           }
-          # Localisation robuste (runner SYSTEM) : le journal msiexec dit ou
+          # Localisation robuste : le journal msiexec dit ou
           # l'install per-user a atterri (INSTALLFOLDER) ; repli : ratissage
           # LOCALAPPDATA + C:\Users\* + profils SYSTEM 64-bit et SysWOW64
-          # (msiexec 32-bit sous runner SYSTEM subit la redirection WOW64 et
-          # atterrit sous SysWOW64\config\systemprofile). Fail-closed si zero
+          # (msiexec 32-bit sous compte de service subit la redirection WOW64
+          # et atterrit sous SysWOW64\config\systemprofile). Fail-closed si zero
           # ou plusieurs candidats ; en echec, le journal est affiche
           # (diagnostic).
           Write-Output "[ci] whoami=$(whoami) LOCALAPPDATA=$env:LOCALAPPDATA"

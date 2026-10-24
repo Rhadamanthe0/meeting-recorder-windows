@@ -1,16 +1,12 @@
 # Tests Windows sans accès aux périphériques audio
 
-Tous les jobs Windows de `windows` et `release` utilisent une VM KVM neuve
-sur MINIPC-CLEM, avec les quatre labels `self-hosted`, `Windows`, `X64` et
-`rhada-run-${{ github.run_id }}-${{ github.run_attempt }}`. Le contrôleur vérifie
-l'affinité au dépôt, au run et à sa tentative. Les PR de forks
-utilisent le profil de test isolé. Le lancement manuel utilise également
-MINIPC-CLEM.
-
-Les tests ordinaires n'ouvrent pas de périphérique audio. Le MSI produit est
-le binaire normal. Son installation et sa désinstallation sont vérifiées dans
-le job `verify-msi`, dans une autre VM Windows jetable. La publication du
-workflow `release` dépend également de cette vérification.
+Tous les jobs Windows de `windows` et `release` utilisent le runner hébergé
+`windows-latest` : une machine neuve à chaque job, y compris pour les PR de
+forks, sans état réutilisé entre PR et release. Les tests ordinaires n'ouvrent
+pas de périphérique audio. Le MSI produit est le binaire normal. Son
+installation et sa désinstallation sont vérifiées dans le job `verify-msi`,
+sur une autre machine Windows hébergée neuve. La publication du workflow
+`release` dépend également de cette vérification.
 
 ## Entrées et sortie simulées
 
@@ -40,7 +36,7 @@ Les tests spécifiques vérifient l'écriture de samples non nuls, la suspension
 des écritures pendant une pause, la reprise et la libération de l'entrée ;
 ils vérifient aussi le décodage et la fin d'une lecture sans sortie matérielle.
 
-Le job `verify-gui` s'exécute dans une VM Windows jetable sur MINIPC-CLEM,
+Le job `verify-msi` s'exécute sur une autre machine Windows hébergée neuve,
 avec un bureau interactif. Il reçoit le runtime synthétique construit par le
 job `build`. Le test GUI n'exécute que ce binaire après vérification de sa
 version. Il vérifie son pipe isolé et capture seulement sa fenêtre via
@@ -48,7 +44,8 @@ version. Il vérifie son pipe isolé et capture seulement sa fenêtre via
 global au bureau. Ses journaux, état IPC et image figurent dans l'artefact
 `synthetic-audio-results`.
 
-Si la VM ne permet pas le rendu d'une fenêtre, ce contrôle échoue explicitement.
+Si la machine hébergée ne permet pas le rendu d'une fenêtre, ce contrôle échoue
+explicitement.
 La simulation ne valide pas les échanges WASAPI avec un pilote, les changements
 de périphérique ou la qualité acoustique réelle. Ces contrôles restent distincts.
 Le banc de transcription et de diarisation reste un contrôle distinct : les

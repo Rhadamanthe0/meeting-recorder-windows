@@ -1,25 +1,7 @@
 # WiX 3.14.1 portable : aucun Chocolatey, installateur global ou privilège admin.
 $ErrorActionPreference = "Stop"
-# La référence scellée contient la même archive officielle, vérifiée lors de
-# son provisionnement. Ne pas la télécharger/extraire à nouveau dans chaque VM.
-$baseWix = 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
-if (Test-Path -LiteralPath $baseWix) {
-    foreach ($name in @("candle.exe", "light.exe", "heat.exe")) {
-        $tool = Join-Path $baseWix $name
-        if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "WiX scellé incomplet : $name absent" }
-    }
-    foreach ($name in @("candle.exe", "light.exe", "heat.exe")) {
-        $help = & (Join-Path $baseWix $name) -?
-        if ($LASTEXITCODE -ne 0 -or -not ($help -match '\b3\.14\.1\.8722\b')) {
-            throw "WiX scellé invalide : $name (3.14.1.8722 attendu)"
-        }
-        $help | Select-Object -First 2
-    }
-    $baseWix >> $env:GITHUB_PATH
-    Write-Output "[ci] WiX 3.14.1 scellé vérifié : $baseWix"
-    return
-}
-# Sans référence équipée, conserver le téléchargement pinné et ses contrôles.
+# Toujours l'archive officielle épinglée et vérifiée ci-dessous : le WiX global
+# de l'image du runner hébergé peut changer de version sans PR du dépôt.
 $wixDir = Join-Path $env:RUNNER_TEMP ("meeting-recorder-wix-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $wixDir | Out-Null
 $zip = Join-Path $wixDir "wix314-binaries.zip"

@@ -15,7 +15,8 @@ permissions:
 
 jobs:
   tag:
-    runs-on: [self-hosted, linux, x64, minipc, ephemeral, podman-jit-v2, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    # Dépôt public : runner Linux hébergé par GitHub (git + gh CLI préinstallés).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
