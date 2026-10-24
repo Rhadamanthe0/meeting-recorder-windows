@@ -18,16 +18,16 @@ concurrency:
 
 jobs:
   build:
-    # Chaque job, y compris les forks, utilise une VM MINIPC neuve et isolée.
-    runs-on: [self-hosted, Windows, X64, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    # Dépôt public : runner Windows hébergé par GitHub, neuf à chaque job (y
+    # compris pour les PR de forks : aucun code de PR ne persiste ailleurs).
+    runs-on: windows-latest
     permissions:
       contents: read
     env:
       # Binaire portable, pas de -march=native du runner (crash AVX512 sur CPU cibles).
       GGML_NATIVE: "OFF"
       RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
-      # Le compte de service français « Système » a un nom non ASCII.
-      # Les outils natifs MSYS2 doivent interpréter ses chemins en UTF-8.
+      # Locale UTF-8 : les outils natifs MSYS2 lisent et émettent en UTF-8.
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
     defaults:
@@ -35,10 +35,6 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Prépare PowerShell pour le service Windows
-        shell: powershell
-        run: ./.github/scripts/setup-powershell.ps1
 
       - name: Test des reprises de téléchargement MSYS2 (sans réseau)
         run: ./.github/scripts/test-msys2-download-retry.ps1
@@ -71,35 +67,9 @@ jobs:
       # Alternative MSVC (non retenue : risque d'échec de link gtk4-rs/
       # libadwaita MinGW depuis MSVC) :
       #   toolchain: stable / targets: x86_64-pc-windows-msvc
-      # Une référence immuable prééquipée (rhada-pc #37) fournit déjà Rust.
-      # Sans celle-ci, le même téléchargement dtolnay reste obligatoire.
-      - name: Vérifie Rust GNU préinstallé
-        id: base-rust
-        run: |
-          $rustRoot = 'C:\RhadaCI\tools\rust'
-          $cargoHome = Join-Path $rustRoot 'cargo'
-          $rustupHome = Join-Path $rustRoot 'rustup'
-          $rustup = Join-Path $cargoHome 'bin\rustup.exe'
-          $ready = Test-Path -LiteralPath $rustup -PathType Leaf
-          if ($ready) {
-            $env:CARGO_HOME = $cargoHome
-            $env:RUSTUP_HOME = $rustupHome
-            $rustInfo = & $rustup run $env:RUSTUP_TOOLCHAIN rustc -vV
-            if ($LASTEXITCODE -ne 0 -or -not ($rustInfo | Where-Object { $_ -eq 'host: x86_64-pc-windows-gnu' })) {
-              throw 'La toolchain GNU scellée est invalide.'
-            }
-            & $rustup run $env:RUSTUP_TOOLCHAIN cargo clippy --version
-            if ($LASTEXITCODE -ne 0) { throw 'Clippy scellé absent.' }
-            & $rustup run $env:RUSTUP_TOOLCHAIN rustfmt --version
-            if ($LASTEXITCODE -ne 0) { throw 'Rustfmt scellé absent.' }
-            "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "RUSTUP_HOME=$rustupHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            (Join-Path $cargoHome 'bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          }
-          "ready=$($ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
+      # L'image windows-latest fournit rustup mais pas la toolchain GNU : elle
+      # est installée ici (rustfmt, clippy inclus).
       - name: Install Rust stable GNU
-        if: steps.base-rust.outputs.ready != 'true'
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable-x86_64-pc-windows-gnu
@@ -111,31 +81,9 @@ jobs:
       - name: Affiche la toolchain (hôte GNU attendu)
         run: rustc -vV
 
-      # Une référence qcow2 scellée peut déjà contenir GTK4 et libadwaita.
-      # Ancienne référence : installation temporaire inchangée, jamais de succès fictif.
-      - name: Vérifie la pile GTK préinstallée
-        id: base-gtk
-        run: |
-          $root = 'C:\msys64'
-          $bin = Join-Path $root 'ucrt64\bin'
-          $tools = @('pkgconf.exe', 'gcc.exe', 'clang.exe', 'cmake.exe')
-          $ready = Test-Path -LiteralPath (Join-Path $root 'usr\bin\bash.exe')
-          foreach ($tool in $tools) {
-            if (-not (Test-Path -LiteralPath (Join-Path $bin $tool))) { $ready = $false }
-          }
-          if ($ready) {
-            $env:PKG_CONFIG_PATH = "$root\ucrt64\lib\pkgconfig;$root\ucrt64\share\pkgconfig"
-            $pkgconf = Join-Path $bin 'pkgconf.exe'
-            foreach ($package in @('gtk4', 'libadwaita-1')) {
-              & $pkgconf --modversion $package
-              if ($LASTEXITCODE -ne 0) { throw "Pile GTK préinstallée invalide : $package" }
-            }
-            "root=$root" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          }
-          "ready=$($ready.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
+      # L'image windows-latest fournit MSYS2 dans C:\msys64 (sans GTK4) :
+      # l'action réutilise cette installation et exporte son emplacement.
       - name: Install GTK4 (MSYS2 UCRT64)
-        if: steps.base-gtk.outputs.ready != 'true'
         id: msys2-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -148,9 +96,8 @@ jobs:
           cache: false
 
       - name: Met à jour MSYS2 et installe GTK sans arrêt global de processus
-        if: steps.base-gtk.outputs.ready != 'true'
         env:
-          MSYS2_ROOT: ${{ steps.base-gtk.outputs.root || steps.msys2-tools.outputs.msys2-location }}
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
         run: ./.github/scripts/install-msys2-packages.ps1 -Root $env:MSYS2_ROOT
 
       # ffmpeg bloquant : requis par export_audio, le step échoue si introuvable.
@@ -184,28 +131,11 @@ jobs:
       # Expose pkg-config + gcc UCRT64 au build cargo (hôte GNU par défaut).
       - name: Expose GTK au build GNU
         env:
-          MSYS2_ROOT: ${{ steps.base-gtk.outputs.root || steps.msys2-tools.outputs.msys2-location }}
+          MSYS2_ROOT: ${{ steps.msys2-tools.outputs.msys2-location }}
         run: |
-          # Diagnostic discriminant : affiche les faits (emplacement MSYS2 reel) au lieu de deviner.
-          Write-Output "[ci] RUNNER_TEMP=$env:RUNNER_TEMP"
-          Get-ChildItem $env:RUNNER_TEMP -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "[ci] tempdir: $($_.FullName)" }
-          $roots = @($env:MSYS2_ROOT, (Join-Path $env:RUNNER_TEMP "setup-msys2"), "D:\msys64", "C:\msys64")
-          $p = $null
-          try { $p = (Get-Command pkgconf.exe -ErrorAction Stop).Source } catch {}
-          foreach ($r in $roots) {
-            Write-Output "[ci] test racine : $r -> $(Test-Path $r)"
-            foreach ($sub in @("ucrt64\bin\pkgconf.exe", "msys64\ucrt64\bin\pkgconf.exe", "usr\bin\pkgconf.exe")) {
-              $cand = $null; try { if ($r) { $cand = Join-Path $r $sub } } catch { $cand = $null }
-              if (-not $p -and $cand -and (Test-Path $cand)) { $p = $cand }
-            }
-            if (Test-Path $r) { Get-ChildItem $r -Directory -ErrorAction SilentlyContinue | Select-Object -First 12 | ForEach-Object { Write-Output "[ci] subdir de $r : $($_.Name)" } }
-          }
-          if (-not $p) {
-            Write-Output "[ci] recherche pkgconf.exe sous RUNNER_TEMP (peut prendre 1-2 min)"
-            Get-ChildItem -Path $env:RUNNER_TEMP -Filter "pkgconf.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { Write-Output "[ci] trouve : $($_.FullName)"; if (-not $p) { $p = $_.FullName } }
-          }
-          if (-not $p) { throw "pkgconf.exe introuvable meme apres diagnostic (voir [ci] ci-dessus)" }
-          $bindir = Split-Path $p -Parent
+          $bindir = Join-Path $env:MSYS2_ROOT "ucrt64\bin"
+          $p = Join-Path $bindir "pkgconf.exe"
+          if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "pkgconf.exe introuvable : $p (MSYS2_ROOT=$env:MSYS2_ROOT)" }
           $ucrt = Split-Path $bindir -Parent
           $bindir >> $env:GITHUB_PATH
           "PKG_CONFIG=$p" >> $env:GITHUB_ENV
@@ -458,7 +388,8 @@ jobs:
           }
           Write-Output "[ci] DLL ORT copiées vers target/release"
 
-      # WiX v3 portable, pinné et vérifié, sans installation globale sur le PC.
+      # WiX v3 portable, pinné et vérifié : version fixée par le dépôt (le
+      # WiX global de l'image hébergée peut changer sans PR).
       - name: Prépare WiX v3 portable (MSI)
         run: ./.github/scripts/setup-wix.ps1
 
@@ -502,8 +433,8 @@ jobs:
             }
           } finally { $probe.Dispose() }
 
-      # Seul le runtime synthétique est transmis à une autre VM MINIPC neuve
-      # pour vérifier le rendu dans son bureau interactif.
+      # Seul le runtime synthétique est transmis au job `verify-msi`, qui
+      # l'exécute sur une autre machine hébergée neuve, bureau interactif inclus.
       - name: Prépare le runtime GUI synthétique
         run: |
           $testStage = Join-Path $env:GITHUB_WORKSPACE "synthetic-runtime"
@@ -548,7 +479,7 @@ jobs:
 
   verify-msi:
     needs: build
-    runs-on: [self-hosted, Windows, X64, "rhada-run-${{ github.run_id }}-${{ github.run_attempt }}"]
+    runs-on: windows-latest
     defaults:
       run:
         shell: pwsh
@@ -569,29 +500,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           path: synthetic-audio-results/
-      # Le diagnostic des DLL installées doit aussi disposer d'objdump après
-      # déplacement sur la machine jetable, sans dépendre du PATH du PC.
-      - name: Vérifie objdump préinstallé pour les imports MSI
-        # Indépendant du résultat GUI ; une référence présente mais invalide échoue.
-        if: ${{ !cancelled() }}
-        id: base-msi
-        run: |
-          $root = 'C:\msys64'
-          $objdump = Join-Path $root 'ucrt64\bin\objdump.exe'
-          $ready = Test-Path -LiteralPath $objdump -PathType Leaf
-          if ($ready) {
-            $version = & $objdump --version
-            if ($LASTEXITCODE -ne 0 -or -not ($version -match '^GNU objdump ')) { throw 'Objdump scellé invalide.' }
-            # Vérifier réellement la lecture PE avant de réutiliser cet outil.
-            $header = & $objdump -p (Join-Path $env:SystemRoot 'System32\kernel32.dll')
-            if ($LASTEXITCODE -ne 0 -or -not ($header -match 'file format pei-x86-64')) { throw 'Objdump scellé ne lit pas les PE x64.' }
-            $version | Select-Object -First 1
-            "root=$root" >> $env:GITHUB_OUTPUT
-          }
-          "ready=$($ready.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      # Le diagnostic des DLL installées a besoin d'objdump après déplacement
+      # du MSI vers cette machine : l'image n'a pas de binaires UCRT64, ce job
+      # installe donc binutils dans le MSYS2 de l'image.
       - name: Outil de vérification des imports MSI
-        # Repli pour les références anciennes ; le contrôle des imports reste obligatoire.
-        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && steps.base-msi.outputs.ready != 'true' }}
+        # Indépendant du résultat GUI ; le contrôle des imports reste obligatoire.
+        if: ${{ !cancelled() }}
         id: msi-tools
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         env:
@@ -602,20 +516,20 @@ jobs:
       - name: Download MSI construit
         id: msi-download
         # Indépendant du GUI, mais dépend bien de la préparation MSI.
-        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && (steps.base-msi.outputs.ready == 'true' || steps.msi-tools.outcome == 'success') }}
+        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows-msi
           path: packaging/windows
-      # Installation sur une machine jetable, jamais sur le PC du propriétaire.
+      # Installation sur le runner hébergé jetable, jamais sur le PC du propriétaire.
       # MSI per-user silencieux puis lancement de
       # l'exe installé avec --help SANS ucrt64/bin au PATH (la closure
       # embarquée doit suffire). --help quitte avant toute init GTK.
       - name: Test MSI per-user (msiexec + exe --help sans UCRT au PATH)
         # Un échec GUI n'empêche pas MSI ; les prérequis MSI doivent avoir réussi.
-        if: ${{ !cancelled() && steps.base-msi.outcome == 'success' && (steps.base-msi.outputs.ready == 'true' || steps.msi-tools.outcome == 'success') && steps.msi-download.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.msi-tools.outcome == 'success' && steps.msi-download.outcome == 'success' }}
         env:
-          UCRT_BIN: ${{ steps.base-msi.outputs.root || steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
+          UCRT_BIN: ${{ steps.msi-tools.outputs.msys2-location }}\ucrt64\bin
         run: |
           $msi = Get-ChildItem packaging/windows/*.msi | Select-Object -First 1
           if (-not $msi) { throw "MSI introuvable sous packaging/windows/" }
@@ -625,11 +539,11 @@ jobs:
             Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
             throw "msiexec /i exit $($install.ExitCode)"
           }
-          # Localisation robuste (runner SYSTEM) : le journal msiexec dit ou
+          # Localisation robuste : le journal msiexec dit ou
           # l'install per-user a atterri (INSTALLFOLDER) ; repli : ratissage
           # LOCALAPPDATA + C:\Users\* + profils SYSTEM 64-bit et SysWOW64
-          # (msiexec 32-bit sous runner SYSTEM subit la redirection WOW64 et
-          # atterrit sous SysWOW64\config\systemprofile). Fail-closed si zero
+          # (msiexec 32-bit sous compte de service subit la redirection WOW64
+          # et atterrit sous SysWOW64\config\systemprofile). Fail-closed si zero
           # ou plusieurs candidats ; en echec, le journal est affiche
           # (diagnostic).
           Write-Output "[ci] whoami=$(whoami) LOCALAPPDATA=$env:LOCALAPPDATA"

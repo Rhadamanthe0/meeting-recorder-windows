@@ -92,19 +92,17 @@ silencieuse : voir [les contrôles CI sans périphériques réels](docs/ci-audio
 
 ## CI
 
-Tous les jobs ciblent MINIPC-CLEM, jamais PC-PRO-CLEM ni PC-FIXE-CLEM.
-Les tâches Linux utilisent `self-hosted,linux,x64,minipc,ephemeral,podman-jit-v2`.
-Les compilations, tests et essais MSI Windows utilisent
-`self-hosted,Windows,X64,rhada-run-${{ github.run_id }}-${{ github.run_attempt }}`.
-Le contrôleur de MINIPC vérifie l'affinité au dépôt, au run et à sa tentative,
-puis lance une VM Windows neuve par job, sans état réutilisé entre PR et release.
-Sans cet environnement, les jobs Windows restent en attente ; le runner
-Linux ne remplace pas les vérifications natives. Cette migration des workflows
-n'installe ni n'enregistre la VM ou les runners sur le serveur.
-Les jobs Linux exigent aussi le label d'affinité
-`rhada-run-${{ github.run_id }}-${{ github.run_attempt }}`.
-Le contrôleur commun privilégie la PR la plus ancienne ayant des CI restantes,
-puis passe à la suivante dès leur fin sans attendre la fusion. Les anciens
-workflows de `master` restent dans la file héritée jusqu’à leur migration.
+Dépôt public : tous les jobs tournent sur les runners hébergés par GitHub.
+`windows.yml` et `release.yml` compilent, testent et essaient le MSI sur
+`windows-latest` ; la publication de release, la veille de l'amont et le tag
+automatique utilisent `ubuntu-latest`. Chaque job reçoit une machine neuve et
+isolée, y compris pour les PR de forks : aucun état ne circule entre PR et
+release, et aucun runner auto-hébergé n'est requis.
+Les dépendances compilées sont restaurées par `Swatinem/rust-cache` et les
+résultats natifs Whisper par `actions/cache`. Les outils absents de l'image
+hébergée (toolchain Rust GNU, GTK4/libadwaita, FFmpeg, ONNX Runtime, WiX,
+binutils) sont installés par le workflow, épinglés et vérifiés par taille et
+SHA-256. Le quota de cache du dépôt est de 10 Go : une exécution après
+éviction du cache est nettement plus longue.
 
 D'après [omarchy-meeting-recorder](https://github.com/jankeesvw/omarchy-meeting-recorder). Licence MIT, voir `LICENSE`.

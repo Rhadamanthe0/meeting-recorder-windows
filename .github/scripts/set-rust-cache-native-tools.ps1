@@ -1,3 +1,6 @@
+# Preuve d'outils scellés : optionnelle. Les runners hébergés n'en fournissent
+# aucune ; l'empreinte utilise alors le marqueur explicite
+# '<absent:legacy-reference>' (échec si le fichier présent est invalide).
 param([string]$ToolsProofPath = 'C:\RhadaCI\tools.json')
 $ErrorActionPreference = 'Stop'
 
