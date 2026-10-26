@@ -289,49 +289,10 @@ jobs:
 
       # Contrôle sur le lock commité.
       - name: Check
-        run: |
-          # Un service peut résoudre une autre installation que la session utilisateur.
-          # Garder un diagnostic du binaire réellement lancé si Windows le refuse.
-          $cargo = (Get-Command cargo.exe -ErrorAction Stop).Source
-          $item = Get-Item -LiteralPath $cargo
-          Write-Output "[ci] cargo=$cargo bytes=$($item.Length)"
-          Write-Output "[ci] cargo SHA256=$((Get-FileHash -LiteralPath $cargo -Algorithm SHA256).Hash)"
-          try {
-            & $cargo check --locked --timings
-            if ($LASTEXITCODE -ne 0) { throw "cargo check a échoué : $LASTEXITCODE" }
-          } catch {
-            $errorObject = $_.Exception
-            while ($errorObject) {
-              Write-Output "[ci] $($errorObject.GetType().FullName): $($errorObject.Message)"
-              if ($errorObject -is [System.ComponentModel.Win32Exception]) {
-                Write-Output "[ci] NativeErrorCode=$($errorObject.NativeErrorCode)"
-              }
-              $errorObject = $errorObject.InnerException
-            }
-            throw
-          }
-
-      # Mesurer les recompilations locales restantes sans modifier le cache.
-      - name: Upload durées de compilation Check
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cargo-check-timings
-          path: target/cargo-timings/*.html
-          if-no-files-found: ignore
-          retention-days: 7
+        run: cargo check --locked
 
       - name: Test
-        run: cargo test --locked --timings
-
-      - name: Upload durées de compilation Test
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cargo-test-timings
-          path: target/cargo-timings/*.html
-          if-no-files-found: ignore
-          retention-days: 7
+        run: cargo test --locked
 
       # Les diagnostics Windows sont corrigés : un échec doit bloquer la CI.
       - name: Clippy (bloquant)
